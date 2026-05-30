@@ -9,9 +9,8 @@ import (
 )
 
 const (
-	tunnelName     = "wg-netip"
-	systemConfPath = "/etc/wireguard/wg-netip.conf"
-	runtimeName    = "/var/run/wireguard/wg-netip.name"
+	tunnelName  = "wg-netip"
+	runtimeName = "/var/run/wireguard/wg-netip.name"
 )
 
 var version = "dev"
@@ -57,8 +56,8 @@ Usage:
   netip-spn version              Print version
 
 Config:
-  Default user config:    ~/.cloudnetip/spn.conf
-  Deployed system path:   ` + systemConfPath + `
+  User config directory:  ~/.cloudnetip/
+  Config file:            ~/.cloudnetip/spn.conf
   Tunnel interface name:  ` + tunnelName + `
 
 Requires: wireguard-tools (brew install wireguard-tools)
@@ -75,6 +74,10 @@ func userConfigDir() string {
 
 func userConfigPath() string {
 	return filepath.Join(userConfigDir(), "spn.conf")
+}
+
+func userWgConfigPath() string {
+	return filepath.Join(userConfigDir(), "wg-netip.conf")
 }
 
 func cmdStatus() {
@@ -113,19 +116,20 @@ func cmdConnect() {
 	}
 	patchedConfig := injectDNSHooks(string(configData))
 
-	fmt.Println("Deploying config to", systemConfPath)
-	mustSudo("install", "-d", "-m", "700", "/etc/wireguard")
-
-	// Write patched config to a temp file, then install it
-	tmpConf := systemConfPath + ".tmp"
-	if err := os.WriteFile(tmpConf, []byte(patchedConfig), 0600); err != nil {
-		fail("cannot write temp config: %v", err)
+	// Write patched config to user directory
+	wgConfPath := userWgConfigPath()
+	dir := userConfigDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		fail("cannot create directory %s: %v", dir, err)
 	}
-	mustSudo("install", "-m", "600", tmpConf, systemConfPath)
-	os.Remove(tmpConf)
+
+	fmt.Println("Deploying config to", wgConfPath)
+	if err := os.WriteFile(wgConfPath, []byte(patchedConfig), 0600); err != nil {
+		fail("cannot write config: %v", err)
+	}
 
 	fmt.Println("Starting tunnel...")
-	mustSudo("wg-quick", "up", tunnelName)
+	mustSudo("wg-quick", "up", wgConfPath)
 	fmt.Println("● SPN: connected")
 }
 
@@ -135,7 +139,8 @@ func cmdDisconnect() {
 		return
 	}
 	requireWireGuard()
-	mustSudo("wg-quick", "down", tunnelName)
+	wgConfPath := userWgConfigPath()
+	mustSudo("wg-quick", "down", wgConfPath)
 	fmt.Println("● SPN: disconnected")
 }
 

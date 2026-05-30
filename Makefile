@@ -43,10 +43,10 @@ app-clean:
 # Zip the .app for upload to GitHub Releases (consumed by the Cask).
 package: app
 	mkdir -p dist
-	cd gui/build && /usr/bin/ditto -c -k --keepParent CloudnetipSPN.app ../../dist/CloudnetipSPN-$(VERSION).zip
+	cd gui/build && /usr/bin/ditto -c -k --keepParent "Cloudnetip SPN.app" ../../dist/Cloudnetip-SPN-$(VERSION).zip
 	@echo
-	@echo "==> dist/CloudnetipSPN-$(VERSION).zip"
-	@echo "    sha256: $$(shasum -a 256 dist/CloudnetipSPN-$(VERSION).zip | awk '{print $$1}')"
+	@echo "==> dist/Cloudnetip-SPN-$(VERSION).zip"
+	@echo "    sha256: $$(shasum -a 256 dist/Cloudnetip-SPN-$(VERSION).zip | awk '{print $$1}')"
 
 # Everything needed to cut a release: cross-compiled CLIs + universal .app .zip.
 release-assets: build-darwin build-linux package

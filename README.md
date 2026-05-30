@@ -47,10 +47,10 @@ The menubar app provides the same actions plus auto-refreshing status. Connect/D
 | Path                                | Purpose                                  |
 |-------------------------------------|------------------------------------------|
 | `~/.cloudnetip/spn.conf`            | Your saved WireGuard config (mode 600)   |
-| `/etc/wireguard/wg-netip.conf`      | Deployed copy used by `wg-quick`         |
+| `~/.cloudnetip/wg-netip.conf`       | Deployed copy used by `wg-quick`         |
 | `/var/run/wireguard/wg-netip.name`  | Created by wg-quick when tunnel is up    |
 
-`netip-spn config` validates the file has an `[Interface]` section and copies it into `~/.cloudnetip/`. Every `connect` re-deploys the saved config to `/etc/wireguard/`, so editing `~/.cloudnetip/spn.conf` is enough — no need to re-run `config`.
+`netip-spn config` validates the file has an `[Interface]` section and copies it into `~/.cloudnetip/`. Every `connect` re-deploys the saved config to `~/.cloudnetip/wg-netip.conf`, so editing `~/.cloudnetip/spn.conf` is enough — no need to re-run `config`.
 
 ## Build
 
@@ -58,7 +58,7 @@ The menubar app provides the same actions plus auto-refreshing status. Connect/D
 make build              # CLI for current platform
 make build-darwin       # CLI for darwin/{arm64,amd64} into dist/
 make build-linux        # CLI for linux/{arm64,amd64} into dist/
-make app                # universal arm64+x86_64 CloudnetipSPN.app
+make app                # universal arm64+x86_64 Cloudnetip SPN.app
 make app-dev            # native-arch only (faster iteration)
 make package            # builds the .app and zips it for the cask, prints sha256
 make release-assets     # everything needed for a release

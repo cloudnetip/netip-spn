@@ -5,5 +5,6 @@ netip-spn
 dist/
 gui/.build/
 gui/build/
+gui/Resources/AppIcon.iconset/
 .idea/
 .tap/

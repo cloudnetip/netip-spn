@@ -39,7 +39,7 @@ run() { if [ "$DRY_RUN" = "1" ]; then printf '  \033[2m[dry] %s\033[0m\n' "$*"; 
 [[ "$VERSION_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
   || die "Usage: $0 vX.Y.Z   (got: '${VERSION_TAG:-<none>}')"
 VERSION="${VERSION_TAG#v}"
-APP_ZIP="dist/CloudnetipSPN-$VERSION.zip"
+APP_ZIP="dist/Cloudnetip-SPN-$VERSION.zip"
 
 [ -d ".git" ] || die "Run from the repo root (no .git here)"
 command -v gh      >/dev/null || die "Install GitHub CLI: brew install gh"

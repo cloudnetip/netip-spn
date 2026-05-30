@@ -13,7 +13,7 @@ set -euo pipefail
 VERSION="${1:-dev}"
 OUT="${2:-./build}"
 UNIVERSAL="${UNIVERSAL:-1}"
-APP="$OUT/CloudnetipSPN.app"
+APP="$OUT/Cloudnetip SPN.app"
 
 cd "$(dirname "$0")"
 
@@ -34,6 +34,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BIN" "$APP/Contents/MacOS/CloudnetipSPN"
 sed "s/__VERSION__/$VERSION/g" Resources/Info.plist > "$APP/Contents/Info.plist"
+
+if [ -f "Resources/AppIcon.icns" ]; then
+    cp "Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+fi
 
 echo "==> ad-hoc signing"
 codesign --force --deep --sign - "$APP"
