@@ -1,8 +1,8 @@
 class CloudnetipSpn < Formula
   desc "CLI for managing the Cloudnetip Shared Private Network"
   homepage "https://github.com/cloudnetip/netip-spn"
-  url "https://github.com/cloudnetip/netip-spn/archive/refs/tags/v0.3.0.tar.gz"
-  sha256 "237eda95872addd38b37139bed29b9171ae1d0a431c46340b1f2fd739dcf7aff"
+  url "https://github.com/cloudnetip/netip-spn/archive/refs/tags/v0.4.0.tar.gz"
+  sha256 "b56c06fa9040c2aaf766309cbddbd5d6cfc804c6d946c4639c5be56d01831862"
   license "MIT"
   head "https://github.com/cloudnetip/netip-spn.git", branch: "main"
 

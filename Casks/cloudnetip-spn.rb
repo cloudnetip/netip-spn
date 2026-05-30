@@ -1,6 +1,6 @@
 cask "cloudnetip-spn" do
-  version "0.3.0"
-  sha256 "3b5e893ed3e13ee0746ffbd49f0636d80367ada95faaca54597707279c981778"
+  version "0.4.0"
+  sha256 "14bd9eecb3659b044df81af04f28cdd5539fb2a9f7359280edb5f9ffcbaa2a9d"
 
   url "https://github.com/cloudnetip/netip-spn/releases/download/v#{version}/Cloudnetip-SPN-#{version}.zip"
   name "Cloudnetip SPN"
