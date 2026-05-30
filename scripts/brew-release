@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# brew-release — cut a new release of cloudnetip-spn and update the Homebrew tap.
+#
+# Usage:
+#   ./scripts/brew-release vX.Y.Z
+#   make release VERSION=X.Y.Z       # equivalent
+#
+# What it does (idempotent — safe to re-run):
+#   1. Preflight: gh + auth, clean working tree, valid version
+#   2. Build universal CloudnetipSPN.app and zip it (dist/CloudnetipSPN-X.Y.Z.zip)
+#   3. Create + push git tag (skip if exists)
+#   4. Create or update GitHub Release; upload the .app zip
+#   5. Compute sha256 of source tarball + .app zip
+#   6. Patch Formula/cloudnetip-spn.rb and Casks/cloudnetip-spn.rb in this repo
+#   7. Commit + push patched formula/cask to the source repo
+#   8. Clone-or-pull the tap repo, copy Formula+Cask into it, commit + push
+#
+# Env vars:
+#   TAP_REPO     Local path to the tap clone     (default: <repo>/.tap/homebrew-spn — gitignored)
+#   TAP_REMOTE   git URL of the tap repo         (default: https://github.com/cloudnetip/homebrew-spn.git)
+#   SOURCE_REPO  GitHub owner/repo of source     (default: cloudnetip/netip-spn)
+#   DRY_RUN=1    Print actions but don't push or commit
+
+set -euo pipefail
+
+VERSION_TAG="${1:-}"
+TAP_REPO="${TAP_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.tap/homebrew-spn}"
+TAP_REMOTE="${TAP_REMOTE:-https://github.com/cloudnetip/homebrew-spn.git}"
+SOURCE_REPO="${SOURCE_REPO:-cloudnetip/netip-spn}"
+DRY_RUN="${DRY_RUN:-0}"
+
+die() { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+say() { printf '\033[36m→ %s\033[0m\n' "$*"; }
+ok()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
+run() { if [ "$DRY_RUN" = "1" ]; then printf '  \033[2m[dry] %s\033[0m\n' "$*"; else "$@"; fi; }
+
+# --- 1. Preflight -----------------------------------------------------------
+
+[[ "$VERSION_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || die "Usage: $0 vX.Y.Z   (got: '${VERSION_TAG:-<none>}')"
+VERSION="${VERSION_TAG#v}"
+APP_ZIP="dist/CloudnetipSPN-$VERSION.zip"
+
+[ -d ".git" ] || die "Run from the repo root (no .git here)"
+command -v gh      >/dev/null || die "Install GitHub CLI: brew install gh"
+command -v perl    >/dev/null || die "perl not found (should ship with macOS)"
+command -v shasum  >/dev/null || die "shasum not found"
+gh auth status >/dev/null 2>&1 || die "Not authenticated. Run: gh auth login"
+
+if [ -n "$(git status --porcelain)" ]; then
+    git status --short
+    die "Working tree is dirty — commit or stash first"
+fi
+
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [ "$CURRENT_BRANCH" != "main" ] && [ "$CURRENT_BRANCH" != "master" ]; then
+    say "Warning: current branch is '$CURRENT_BRANCH', not main/master."
+    read -r -p "Continue anyway? [y/N] " yn
+    [[ "$yn" =~ ^[Yy]$ ]] || die "Aborted"
+fi
+
+ok "Preflight passed — releasing $VERSION_TAG to $SOURCE_REPO"
+[ "$DRY_RUN" = "1" ] && say "DRY_RUN=1 — no remote operations will execute"
+
+# --- 2. Build assets --------------------------------------------------------
+
+say "Building universal .app and zipping"
+make package VERSION="$VERSION" >/dev/null
+[ -f "$APP_ZIP" ] || die "missing $APP_ZIP after make package"
+
+# --- 3. Tag and push --------------------------------------------------------
+
+if git rev-parse "$VERSION_TAG" >/dev/null 2>&1; then
+    EXISTING_SHA="$(git rev-list -n1 "$VERSION_TAG")"
+    HEAD_SHA="$(git rev-parse HEAD)"
+    if [ "$EXISTING_SHA" != "$HEAD_SHA" ]; then
+        die "Tag $VERSION_TAG already exists at $EXISTING_SHA but HEAD is $HEAD_SHA. Delete the tag or check out the tagged commit."
+    fi
+    say "Tag $VERSION_TAG already at HEAD — reusing"
+else
+    say "Creating tag $VERSION_TAG"
+    run git tag "$VERSION_TAG"
+fi
+say "Pushing tag to origin"
+run git push origin "$VERSION_TAG"
+
+# --- 4. GitHub Release ------------------------------------------------------
+
+if gh release view "$VERSION_TAG" --repo "$SOURCE_REPO" >/dev/null 2>&1; then
+    say "Release $VERSION_TAG exists — uploading asset (clobber)"
+    run gh release upload "$VERSION_TAG" "$APP_ZIP" --repo "$SOURCE_REPO" --clobber
+else
+    say "Creating GitHub Release $VERSION_TAG"
+    run gh release create "$VERSION_TAG" "$APP_ZIP" \
+        --repo "$SOURCE_REPO" --title "$VERSION_TAG" --generate-notes
+fi
+
+# --- 5. sha256s -------------------------------------------------------------
+
+APP_SHA256="$(shasum -a 256 "$APP_ZIP" | awk '{print $1}')"
+say "Downloading source tarball to compute its sha256"
+SOURCE_URL="https://github.com/$SOURCE_REPO/archive/refs/tags/$VERSION_TAG.tar.gz"
+TARBALL_TMP="$(mktemp -t cloudnetip-spn-src.XXXXXX).tar.gz"
+trap 'rm -f "$TARBALL_TMP"' EXIT
+
+# After tag push the tarball is usually available within a couple of seconds.
+# Retry briefly to absorb GitHub propagation delay.
+for attempt in 1 2 3 4 5; do
+    if curl -fsSL "$SOURCE_URL" -o "$TARBALL_TMP"; then break; fi
+    say "  source tarball not ready yet (attempt $attempt) — sleeping 3s"
+    sleep 3
+    [ "$attempt" = 5 ] && die "could not download $SOURCE_URL"
+done
+SOURCE_SHA256="$(shasum -a 256 "$TARBALL_TMP" | awk '{print $1}')"
+
+ok "sha256 computed"
+echo "    app zip:        $APP_SHA256"
+echo "    source tarball: $SOURCE_SHA256"
+
+# --- 6. Patch local Formula and Cask ---------------------------------------
+
+say "Patching Formula/cloudnetip-spn.rb and Casks/cloudnetip-spn.rb"
+
+# Formula: rewrite tag in url + sha256
+perl -i -pe "s|archive/refs/tags/v\\d+\\.\\d+\\.\\d+\\.tar\\.gz|archive/refs/tags/${VERSION_TAG}.tar.gz|" \
+    Formula/cloudnetip-spn.rb
+perl -i -pe "s|sha256 \"[^\"]*\"|sha256 \"${SOURCE_SHA256}\"|" \
+    Formula/cloudnetip-spn.rb
+
+# Cask: rewrite version + sha256 (only the top-level "  version" line and the first sha256)
+perl -i -pe 'BEGIN{$d=0} if(!$d && /^  version "/){s|"[^"]*"|"'"$VERSION"'"|;$d=1}' \
+    Casks/cloudnetip-spn.rb
+perl -i -pe 'BEGIN{$d=0} if(!$d && /^  sha256 "/){s|"[^"]*"|"'"$APP_SHA256"'"|;$d=1}' \
+    Casks/cloudnetip-spn.rb
+
+# --- 7. Commit & push patched files to source repo --------------------------
+
+if [ -n "$(git status --porcelain Formula/ Casks/)" ]; then
+    say "Committing updated Formula+Cask in source repo"
+    run git add Formula/cloudnetip-spn.rb Casks/cloudnetip-spn.rb
+    run git commit -m "release: $VERSION_TAG"
+    run git push origin "$CURRENT_BRANCH"
+else
+    say "Formula+Cask already up to date in source repo"
+fi
+
+# --- 8. Sync to tap repo ----------------------------------------------------
+
+if [ ! -d "$TAP_REPO/.git" ]; then
+    say "Cloning tap into $TAP_REPO"
+    run git clone "$TAP_REMOTE" "$TAP_REPO"
+else
+    say "Pulling latest in $TAP_REPO"
+    run git -C "$TAP_REPO" pull --ff-only
+fi
+
+if [ "$DRY_RUN" != "1" ]; then
+    mkdir -p "$TAP_REPO/Formula" "$TAP_REPO/Casks"
+    cp Formula/cloudnetip-spn.rb "$TAP_REPO/Formula/cloudnetip-spn.rb"
+    cp Casks/cloudnetip-spn.rb   "$TAP_REPO/Casks/cloudnetip-spn.rb"
+fi
+
+if [ -n "$(git -C "$TAP_REPO" status --porcelain 2>/dev/null)" ]; then
+    say "Committing tap update"
+    run git -C "$TAP_REPO" add Formula/ Casks/
+    run git -C "$TAP_REPO" commit -m "cloudnetip-spn $VERSION"
+    run git -C "$TAP_REPO" push
+else
+    say "Tap already up to date — nothing to push"
+fi
+
+echo
+ok "Released $VERSION_TAG"
+echo
+echo "Verify with:"
+echo "  brew untap cloudnetip/spn 2>/dev/null; brew tap cloudnetip/spn"
+echo "  brew install --cask cloudnetip-spn"

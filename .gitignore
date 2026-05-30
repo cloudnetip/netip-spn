@@ -1,0 +1,9 @@
+netip-spn
+*.test
+*.out
+.DS_Store
+dist/
+gui/.build/
+gui/build/
+.idea/
+.tap/
