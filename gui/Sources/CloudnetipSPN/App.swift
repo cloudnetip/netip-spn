@@ -27,6 +27,9 @@ struct MenuContent: View {
         if let detail = controller.statusDetail {
             Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
         }
+        if let traffic = controller.trafficLine {
+            Text(traffic).font(.system(size: 11)).foregroundStyle(.secondary)
+        }
         Divider()
 
         if controller.isConnected {
@@ -47,9 +50,17 @@ struct MenuContent: View {
 
         Divider()
 
+        Toggle("Launch at login", isOn: Binding(
+            get: { controller.launchAtLogin },
+            set: { _ in controller.toggleLaunchAtLogin() }
+        ))
+
         Button("Refresh") { controller.refresh() }
             .keyboardShortcut("r")
 
+        Divider()
+
+        Button("About Cloudnetip SPN") { controller.showAbout() }
         Button("Quit Cloudnetip SPN") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
     }

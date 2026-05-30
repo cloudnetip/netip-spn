@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -24,6 +25,8 @@ func main() {
 	switch os.Args[1] {
 	case "status":
 		cmdStatus()
+	case "stats":
+		cmdStats()
 	case "connect", "up":
 		cmdConnect()
 	case "disconnect", "down":
@@ -52,6 +55,7 @@ Usage:
   netip-spn connect              Bring SPN tunnel up
   netip-spn disconnect           Bring SPN tunnel down
   netip-spn status               Show tunnel state
+  netip-spn stats                Print connection stats as JSON (since/rx/tx)
   netip-spn config [path]        Set config file (opens file picker if path omitted)
   netip-spn version              Print version
 
@@ -94,6 +98,77 @@ func cmdStatus() {
 	fmt.Printf("● SPN: connected (%s → %s)\n", tunnelName, utun)
 	fmt.Println()
 	fmt.Println("For peer details run: sudo wg show", tunnelName)
+}
+
+// cmdStats prints a one-line JSON object with connection time, interface,
+// and rx/tx byte counters. Designed for the menubar app to poll cheaply.
+func cmdStats() {
+	info, err := os.Stat(runtimeName)
+	if err != nil {
+		fmt.Println(`{"connected":false}`)
+		return
+	}
+	utun := ""
+	if data, err := os.ReadFile(runtimeName); err == nil {
+		utun = strings.TrimSpace(string(data))
+	}
+	if utun == "" {
+		utun = findWGUtun()
+	}
+
+	since := info.ModTime().Unix()
+	rx, tx := readIfaceCounters(utun)
+	fmt.Printf(`{"connected":true,"iface":%q,"since":%d,"rx":%d,"tx":%d}`+"\n",
+		utun, since, rx, tx)
+}
+
+// readIfaceCounters parses `netstat -ibn` to get RX/TX bytes for the given
+// interface. macOS-only. Returns 0,0 if the interface is missing or netstat
+// fails — never errors, since stats are advisory.
+func readIfaceCounters(iface string) (uint64, uint64) {
+	if iface == "" {
+		return 0, 0
+	}
+	out, err := exec.Command("netstat", "-ibn").Output()
+	if err != nil {
+		return 0, 0
+	}
+	// On macOS netstat -ibn emits two row shapes:
+	//   link-level (10 cols): Name Mtu Network=<Link#N> Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
+	//   address-level (11 cols): Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
+	// The address-level row only counts packets on that family, so the
+	// link-level row is the source of truth — sum is the per-iface total.
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 10 || fields[0] != iface {
+			continue
+		}
+		// Link-level rows have "<Link#N>" in the Network column and no Address.
+		if strings.HasPrefix(fields[2], "<Link#") {
+			rx, _ := strconv.ParseUint(fields[5], 10, 64)
+			tx, _ := strconv.ParseUint(fields[8], 10, 64)
+			return rx, tx
+		}
+	}
+	return 0, 0
+}
+
+// findWGUtun returns the utun interface that WireGuard's userspace daemon is
+// bound to. It reads /var/run/wireguard/ — the directory is world-readable on
+// macOS even though the .name file inside is root-only. Each running tunnel
+// leaves a utunN.sock socket there, so the .sock filename gives us the iface.
+func findWGUtun() string {
+	entries, err := os.ReadDir("/var/run/wireguard")
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, "utun") && strings.HasSuffix(name, ".sock") {
+			return strings.TrimSuffix(name, ".sock")
+		}
+	}
+	return ""
 }
 
 func cmdConnect() {

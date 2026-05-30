@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ServiceManagement
 import SwiftUI
 
 @MainActor
@@ -8,11 +9,14 @@ final class SPNController: ObservableObject {
     @Published var hasConfig = false
     @Published var statusLine = "Checking…"
     @Published var statusDetail: String?
+    @Published var trafficLine: String?
     @Published var error: String?
+    @Published var launchAtLogin: Bool = SPNController.readLaunchAtLogin()
 
     private var pollTimer: Timer?
 
     init() {
+        applyLaunchAtLogin(launchAtLogin)
         refresh()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
@@ -27,6 +31,7 @@ final class SPNController: ObservableObject {
             isConnected = false
             statusLine = "netip-spn CLI not found"
             statusDetail = "Run: brew install netip/spn/netip-spn"
+            trafficLine = nil
             error = nil
             return
         }
@@ -38,9 +43,75 @@ final class SPNController: ObservableObject {
         error = nil
         let out = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         isConnected = out.contains("connected") && !out.contains("disconnected")
-        let lines = out.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true)
-        statusLine = isConnected ? "SPN: Connected" : "SPN: Disconnected"
-        statusDetail = lines.count > 1 ? String(lines[0]) : nil
+
+        if isConnected {
+            applyStats(cli: cli)
+            let lines = out.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true)
+            statusDetail = lines.count > 1 ? String(lines[0]) : nil
+        } else {
+            statusLine = "SPN: Disconnected"
+            statusDetail = nil
+            trafficLine = nil
+        }
+    }
+
+    private func applyStats(cli: String) {
+        let result = run(cli, args: ["stats"])
+        guard result.exitCode == 0,
+              let data = result.stdout.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (obj["connected"] as? Bool) == true
+        else {
+            statusLine = "SPN: Connected"
+            trafficLine = nil
+            return
+        }
+
+        var sinceUnix: Int64 = 0
+        if let s = obj["since"] as? Int64 { sinceUnix = s }
+        else if let s = obj["since"] as? Int { sinceUnix = Int64(s) }
+        else if let s = obj["since"] as? Double { sinceUnix = Int64(s) }
+
+        let rx = readUInt(obj["rx"])
+        let tx = readUInt(obj["tx"])
+
+        if sinceUnix > 0 {
+            let elapsed = Int(Date().timeIntervalSince1970) - Int(sinceUnix)
+            statusLine = "SPN: Connected — " + formatDuration(seconds: elapsed)
+        } else {
+            statusLine = "SPN: Connected"
+        }
+        trafficLine = "↓ Received: \(formatBytes(rx))    ↑ Sent: \(formatBytes(tx))"
+    }
+
+    private func readUInt(_ v: Any?) -> UInt64 {
+        if let n = v as? UInt64 { return n }
+        if let n = v as? Int64 { return UInt64(max(0, n)) }
+        if let n = v as? Int { return UInt64(max(0, n)) }
+        if let n = v as? Double { return UInt64(max(0, n)) }
+        return 0
+    }
+
+    private func formatDuration(seconds: Int) -> String {
+        let s = max(0, seconds)
+        let h = s / 3600
+        let m = (s % 3600) / 60
+        let sec = s % 60
+        if h > 0 { return String(format: "%dh %02dm %02ds", h, m, sec) }
+        if m > 0 { return String(format: "%dm %02ds", m, sec) }
+        return String(format: "%ds", sec)
+    }
+
+    private func formatBytes(_ n: UInt64) -> String {
+        let units = ["B", "KB", "MB", "GB", "TB"]
+        var value = Double(n)
+        var unit = 0
+        while value >= 1024 && unit < units.count - 1 {
+            value /= 1024
+            unit += 1
+        }
+        if unit == 0 { return "\(Int(value)) \(units[unit])" }
+        return String(format: "%.1f %@", value, units[unit])
     }
 
     func connect() {
@@ -75,6 +146,55 @@ final class SPNController: ObservableObject {
     func revealConfig() {
         let path = (NSString(string: "~/.cloudnetip/spn.conf").expandingTildeInPath)
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    func showAbout() {
+        let cliVersion: String = {
+            guard let cli = locateCLI() else { return "not installed" }
+            let result = run(cli, args: ["version"])
+            return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "netip-spn ", with: "")
+        }()
+        let guiVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+
+        let alert = NSAlert()
+        alert.messageText = "Cloudnetip SPN"
+        alert.informativeText = "GUI version: \(guiVersion)\nCLI version: \(cliVersion)"
+        alert.alertStyle = .informational
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
+    func toggleLaunchAtLogin() {
+        launchAtLogin.toggle()
+        applyLaunchAtLogin(launchAtLogin)
+    }
+
+    private static func readLaunchAtLogin() -> Bool {
+        // Default: on. The first launch flips the switch on; subsequent launches
+        // honour what the user toggled.
+        let key = "launchAtLogin"
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: key) == nil {
+            defaults.set(true, forKey: key)
+            return true
+        }
+        return defaults.bool(forKey: key)
+    }
+
+    private func applyLaunchAtLogin(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: "launchAtLogin")
+        let service = SMAppService.mainApp
+        do {
+            if enabled {
+                if service.status != .enabled { try service.register() }
+            } else {
+                if service.status == .enabled { try service.unregister() }
+            }
+        } catch {
+            // Surface as a non-blocking error on the menu.
+            self.error = "Login item: \(error.localizedDescription)"
+        }
     }
 
     private func locateCLI() -> String? {
