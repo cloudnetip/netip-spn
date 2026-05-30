@@ -12,6 +12,12 @@ cask "cloudnetip-spn" do
 
   app "CloudnetipSPN.app"
 
+  postflight do
+    system_command "/usr/bin/xattr",
+                   args: ["-d", "com.apple.quarantine", "#{appdir}/CloudnetipSPN.app"],
+                   sudo: false
+  end
+
   zap trash: [
     "~/Library/Preferences/com.cloudnetip.spn.plist",
     "~/Library/Saved Application State/com.cloudnetip.spn.savedState",

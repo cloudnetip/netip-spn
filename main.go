@@ -106,9 +106,23 @@ func cmdConnect() {
 		return
 	}
 
+	// Read user config and inject DNS hooks if DNS is present
+	configData, err := os.ReadFile(src)
+	if err != nil {
+		fail("cannot read config: %v", err)
+	}
+	patchedConfig := injectDNSHooks(string(configData))
+
 	fmt.Println("Deploying config to", systemConfPath)
 	mustSudo("install", "-d", "-m", "700", "/etc/wireguard")
-	mustSudo("install", "-m", "600", src, systemConfPath)
+
+	// Write patched config to a temp file, then install it
+	tmpConf := systemConfPath + ".tmp"
+	if err := os.WriteFile(tmpConf, []byte(patchedConfig), 0600); err != nil {
+		fail("cannot write temp config: %v", err)
+	}
+	mustSudo("install", "-m", "600", tmpConf, systemConfPath)
+	os.Remove(tmpConf)
 
 	fmt.Println("Starting tunnel...")
 	mustSudo("wg-quick", "up", tunnelName)
@@ -199,4 +213,104 @@ func mustSudo(args ...string) {
 func fail(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "✗ "+format+"\n", a...)
 	os.Exit(1)
+}
+
+// injectDNSHooks parses the WireGuard config and injects PostUp/PreDown hooks
+// to set DNS via /etc/resolver/ (macOS split DNS), ensuring DNS works reliably.
+func injectDNSHooks(config string) string {
+	lines := strings.Split(config, "\n")
+	var result []string
+	var dnsServers []string
+	var searchDomains []string
+	inInterface := false
+	hasPostUp := false
+	hasPreDown := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Track [Interface] section
+		if strings.HasPrefix(trimmed, "[Interface]") {
+			inInterface = true
+			result = append(result, line)
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			inInterface = false
+		}
+
+		// Extract DNS servers from Interface section
+		if inInterface && strings.HasPrefix(trimmed, "DNS") {
+			parts := strings.SplitN(trimmed, "=", 2)
+			if len(parts) == 2 {
+				dns := strings.TrimSpace(parts[1])
+				// Handle comma-separated DNS
+				for _, d := range strings.Split(dns, ",") {
+					d = strings.TrimSpace(d)
+					if d != "" {
+						dnsServers = append(dnsServers, d)
+					}
+				}
+			}
+		}
+
+		// Check if PostUp/PreDown already exist
+		if strings.HasPrefix(trimmed, "PostUp") {
+			hasPostUp = true
+		}
+		if strings.HasPrefix(trimmed, "PreDown") {
+			hasPreDown = true
+		}
+
+		result = append(result, line)
+	}
+
+	// If DNS is present and no custom hooks, inject /etc/resolver/-based DNS
+	if len(dnsServers) > 0 && !hasPostUp && !hasPreDown {
+		// Detect search domains from config or use common internal TLDs
+		if len(searchDomains) == 0 {
+			// Default internal domains that should use the VPN DNS
+			searchDomains = []string{"netip", "internal", "local"}
+		}
+
+		// Find the end of [Interface] section to inject hooks
+		for i, line := range result {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "[Interface]") {
+				// Find where to insert
+				insertAt := i + 1
+				for j := i + 1; j < len(result); j++ {
+					t := strings.TrimSpace(result[j])
+					if strings.HasPrefix(t, "[") {
+						break
+					}
+					if t != "" && !strings.HasPrefix(t, "#") {
+						insertAt = j + 1
+					}
+				}
+
+				var hooks []string
+				// Create resolver files for each search domain
+				for _, domain := range searchDomains {
+					resolverFile := fmt.Sprintf("/etc/resolver/%s", domain)
+					// PostUp: create resolver file
+					postUp := fmt.Sprintf("mkdir -p /etc/resolver && printf 'nameserver %s\\n' > %s",
+						dnsServers[0], resolverFile)
+					hooks = append(hooks, fmt.Sprintf("PostUp = %s", postUp))
+				}
+
+				// PreDown: remove resolver files
+				for _, domain := range searchDomains {
+					resolverFile := fmt.Sprintf("/etc/resolver/%s", domain)
+					hooks = append(hooks, fmt.Sprintf("PreDown = rm -f %s", resolverFile))
+				}
+
+				// Insert hooks
+				result = append(result[:insertAt], append(hooks, result[insertAt:]...)...)
+				break
+			}
+		}
+	}
+
+	return strings.Join(result, "\n")
 }
