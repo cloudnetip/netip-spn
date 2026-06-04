@@ -16,16 +16,16 @@
 #   8. Clone-or-pull the tap repo, copy Formula+Cask into it, commit + push
 #
 # Env vars:
-#   TAP_REPO     Local path to the tap clone     (default: <repo>/.tap/homebrew-spn — gitignored)
-#   TAP_REMOTE   git URL of the tap repo         (default: https://github.com/cloudnetip/homebrew-spn.git)
+#   TAP_REPO     Local path to the tap clone     (default: <repo>/.tap/homebrew-tap — gitignored)
+#   TAP_REMOTE   git URL of the tap repo         (default: https://github.com/cloudnetip/homebrew-tap.git)
 #   SOURCE_REPO  GitHub owner/repo of source     (default: cloudnetip/netip-spn)
 #   DRY_RUN=1    Print actions but don't push or commit
 
 set -euo pipefail
 
 VERSION_TAG="${1:-}"
-TAP_REPO="${TAP_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.tap/homebrew-spn}"
-TAP_REMOTE="${TAP_REMOTE:-https://github.com/cloudnetip/homebrew-spn.git}"
+TAP_REPO="${TAP_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.tap/homebrew-tap}"
+TAP_REMOTE="${TAP_REMOTE:-https://github.com/cloudnetip/homebrew-tap.git}"
 SOURCE_REPO="${SOURCE_REPO:-cloudnetip/netip-spn}"
 DRY_RUN="${DRY_RUN:-0}"
 
@@ -173,5 +173,5 @@ echo
 ok "Released $VERSION_TAG"
 echo
 echo "Verify with:"
-echo "  brew untap cloudnetip/spn 2>/dev/null; brew tap cloudnetip/spn"
+echo "  brew untap cloudnetip/tap 2>/dev/null; brew tap cloudnetip/tap"
 echo "  brew install --cask cloudnetip-spn"

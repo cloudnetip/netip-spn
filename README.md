@@ -10,7 +10,7 @@ CLI and macOS menubar app to bring the Cloudnetip Shared Private Network up and 
 ### macOS
 
 ```bash
-brew tap cloudnetip/spn
+brew tap cloudnetip/tap
 brew install cloudnetip-spn          # CLI only
 brew install --cask cloudnetip-spn   # GUI + CLI (the cask depends on the formula)
 ```
@@ -89,13 +89,13 @@ make release-assets     # everything needed for a release
 You need two GitHub repos under the `cloudnetip` org:
 
 1. **`github.com/cloudnetip/netip-spn`** — this repository (source)
-2. **`github.com/cloudnetip/homebrew-spn`** — the tap (Homebrew requires the `homebrew-` prefix; the tap is then referenced as `cloudnetip/spn`)
+2. **`github.com/cloudnetip/homebrew-tap`** — the tap (Homebrew requires the `homebrew-` prefix; the tap is then referenced as `cloudnetip/tap`). One tap holds all Cloudnetip formulas/casks (cloudnetip-spn now, more later).
 
 ### One-time setup
 
-Create the tap repo on GitHub: **`github.com/cloudnetip/homebrew-spn`** (Homebrew requires the `homebrew-` prefix; the tap is then referenced as `cloudnetip/spn`). Initialize it empty — the release script will populate it on the first run.
+Create the tap repo on GitHub: **`github.com/cloudnetip/homebrew-tap`**. Initialize it empty — the release script will populate it on the first run.
 
-By default the script clones the tap into `<repo>/.tap/homebrew-spn` (gitignored), so you don't need to manage a separate sibling directory. To use a different location, set `TAP_REPO=/path/to/clone`.
+By default the script clones the tap into `<repo>/.tap/homebrew-tap` (gitignored), so you don't need to manage a separate sibling directory. To use a different location, set `TAP_REPO=/path/to/clone`.
 
 ### Cutting a release
 
@@ -110,7 +110,7 @@ That's it. The script does everything:
 - Computes sha256 of the source tarball and .app zip
 - Patches `Formula/cloudnetip-spn.rb` and `Casks/cloudnetip-spn.rb` with the new version + sha256s
 - Commits and pushes the patched files to this repo
-- Clones (or pulls) the tap into `.tap/homebrew-spn` (gitignored), copies the formulas, commits and pushes
+- Clones (or pulls) the tap into `.tap/homebrew-tap` (gitignored), copies the formulas, commits and pushes
 
 **Dry run** (prints actions without pushing):
 ```bash
@@ -125,8 +125,8 @@ make release VERSION=0.1.0 DRY_RUN=1
 ### Verify the release
 
 ```bash
-brew untap cloudnetip/spn 2>/dev/null
-brew tap cloudnetip/spn
+brew untap cloudnetip/tap 2>/dev/null
+brew tap cloudnetip/tap
 brew install --cask cloudnetip-spn
 ```
 

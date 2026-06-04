@@ -7,7 +7,7 @@ cask "cloudnetip-spn" do
   desc "Menubar app for the Cloudnetip Shared Private Network"
   homepage "https://github.com/cloudnetip/netip-spn"
 
-  depends_on formula: "cloudnetip/spn/cloudnetip-spn"
+  depends_on formula: "cloudnetip/tap/cloudnetip-spn"
   depends_on macos: ">= :ventura"
 
   app "Cloudnetip SPN.app"
