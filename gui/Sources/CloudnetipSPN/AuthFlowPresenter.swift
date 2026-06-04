@@ -24,7 +24,7 @@ enum AuthFlowPresenter {
                     controller.refresh()
                     let done = NSAlert()
                     done.messageText = "✓ Configured"
-                    done.informativeText = "Your SPN config has been saved. You can now connect."
+                    done.informativeText = "Successful handshake with Cloudnetip SPN. You can now connect."
                     NSApp.activate(ignoringOtherApps: true)
                     done.runModal()
                 } else if let err = auth.lastError {

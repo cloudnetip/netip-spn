@@ -1,7 +1,7 @@
 import AppKit
 import CryptoKit
+import Darwin
 import Foundation
-import Network
 
 // OAuth 2.0 authorization-code flow with PKCE (RFC 7636) over a loopback
 // redirect (RFC 8252). The server's claim endpoint returns a wg-quick config
@@ -173,9 +173,10 @@ final class AuthService: ObservableObject {
 
 // MARK: - Loopback HTTP server
 
-// Minimal HTTP/1.1 server bound to 127.0.0.1:0. Listens for exactly one
-// callback request, parses ?code=...&state=..., responds with a tiny "you
-// can close this tab" page, and resolves the awaiting continuation.
+// Minimal HTTP/1.1 server bound to 127.0.0.1:0 via POSIX sockets. We use
+// raw BSD sockets (not NWListener) because NWListener.port is populated
+// asynchronously after start() and a polling loop occasionally returned 0
+// in release builds — so the redirect_uri shipped a port=0 URL.
 final class LoopbackServer: @unchecked Sendable {
     struct Callback {
         let code: String?
@@ -183,7 +184,7 @@ final class LoopbackServer: @unchecked Sendable {
         let error: String?
     }
 
-    private let listener: NWListener
+    private let listenFD: Int32
     private var continuation: CheckedContinuation<Callback, Error>?
     private let queue = DispatchQueue(label: "netip.spn.loopback")
     private var done = false
@@ -191,35 +192,66 @@ final class LoopbackServer: @unchecked Sendable {
     let port: Int
 
     static func start() throws -> LoopbackServer {
-        let params = NWParameters.tcp
-        params.allowLocalEndpointReuse = true
-        params.requiredInterfaceType = .loopback
-        let listener = try NWListener(using: params, on: .any)
-        let bootstrap = LoopbackServer(listener: listener)
-        listener.start(queue: bootstrap.queue)
-        let deadline = Date().addingTimeInterval(2)
-        while listener.port == nil && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.01)
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw makeErr("socket(): \(String(cString: strerror(errno)))") }
+
+        var yes: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0                                  // kernel picks
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+
+        let bindOK = withUnsafePointer(to: &addr) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.bind(fd, sa, addrLen)
+            }
         }
-        guard let p = listener.port else {
-            listener.cancel()
-            throw NSError(domain: "LoopbackServer", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "could not bind loopback port"])
+        if bindOK != 0 {
+            let msg = String(cString: strerror(errno))
+            close(fd)
+            throw makeErr("bind(): \(msg)")
         }
-        return LoopbackServer(listener: listener, port: Int(p.rawValue))
+        if listen(fd, 4) != 0 {
+            let msg = String(cString: strerror(errno))
+            close(fd)
+            throw makeErr("listen(): \(msg)")
+        }
+
+        var bound = sockaddr_in()
+        var boundLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameOK = withUnsafeMutablePointer(to: &bound) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                getsockname(fd, sa, &boundLen)
+            }
+        }
+        if nameOK != 0 {
+            let msg = String(cString: strerror(errno))
+            close(fd)
+            throw makeErr("getsockname(): \(msg)")
+        }
+        let port = Int(UInt16(bigEndian: bound.sin_port))
+        guard port > 0 else {
+            close(fd)
+            throw makeErr("kernel returned port 0")
+        }
+
+        return LoopbackServer(listenFD: fd, port: port)
     }
 
-    private init(listener: NWListener) {
-        self.listener = listener
-        self.port = 0
-    }
-
-    private init(listener: NWListener, port: Int) {
-        self.listener = listener
+    private init(listenFD: Int32, port: Int) {
+        self.listenFD = listenFD
         self.port = port
-        listener.newConnectionHandler = { [weak self] conn in
-            self?.handle(conn)
-        }
+        // accept() blocks, so run it on a dedicated background thread —
+        // not on `queue`, which we keep free for state synchronization.
+        Thread.detachNewThread { [weak self] in self?.acceptLoop() }
+    }
+
+    private static func makeErr(_ msg: String) -> NSError {
+        NSError(domain: "LoopbackServer", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: msg])
     }
 
     func waitForCallback(timeout: TimeInterval) async throws -> Callback {
@@ -246,31 +278,45 @@ final class LoopbackServer: @unchecked Sendable {
 
     func stop() {
         queue.async {
+            guard !self.done else { return }
             self.done = true
-            self.listener.cancel()
+            close(self.listenFD)
         }
     }
 
-    private func handle(_ conn: NWConnection) {
-        conn.start(queue: queue)
-        conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, _, _ in
-            guard let self, let data, !data.isEmpty else {
-                conn.cancel()
-                return
+    private func acceptLoop() {
+        while !done {
+            var caddr = sockaddr()
+            var clen = socklen_t(MemoryLayout<sockaddr>.size)
+            let client = accept(listenFD, &caddr, &clen)
+            if client < 0 {
+                if done { return }
+                Thread.sleep(forTimeInterval: 0.01)
+                continue
             }
-            let request = String(data: data, encoding: .utf8) ?? ""
-            let cb = Self.parseCallback(request)
-            let body = Self.responseHTML(cb)
-            let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-            conn.send(content: resp.data(using: .utf8), completion: .contentProcessed { _ in
-                conn.cancel()
-            })
-            self.queue.async {
-                guard !self.done else { return }
-                self.done = true
-                self.continuation?.resume(returning: cb)
-                self.continuation = nil
-            }
+            handleClient(client)
+        }
+    }
+
+    private func handleClient(_ fd: Int32) {
+        defer { close(fd) }
+        var buf = [UInt8](repeating: 0, count: 8192)
+        let n = recv(fd, &buf, buf.count, 0)
+        let request = n > 0
+            ? String(bytes: buf[0..<n], encoding: .utf8) ?? ""
+            : ""
+        let cb = Self.parseCallback(request)
+        let body = Self.responseHTML(cb)
+        let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+        resp.withCString { ptr in
+            _ = send(fd, ptr, strlen(ptr), 0)
+        }
+        queue.async {
+            guard !self.done else { return }
+            self.done = true
+            self.continuation?.resume(returning: cb)
+            self.continuation = nil
+            close(self.listenFD)
         }
     }
 
