@@ -159,10 +159,35 @@ final class SPNController: ObservableObject {
 
         let alert = NSAlert()
         alert.messageText = "Cloudnetip SPN"
-        alert.informativeText = "GUI version: \(guiVersion)\nCLI version: \(cliVersion)"
+        let info = NSMutableAttributedString(
+            string: "GUI version: \(guiVersion)\nCLI version: \(cliVersion)\n\n"
+        )
+        let linkText = "https://cloudnetip.com"
+        let link = NSAttributedString(string: linkText, attributes: [
+            .link: URL(string: linkText)!,
+            .foregroundColor: NSColor.linkColor,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ])
+        info.append(link)
+
+        let field = NSTextView(frame: NSRect(x: 0, y: 0, width: 260, height: 60))
+        field.isEditable = false
+        field.isSelectable = true
+        field.drawsBackground = false
+        field.textStorage?.setAttributedString(info)
+        field.font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        alert.accessoryView = field
+
         alert.alertStyle = .informational
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
+    }
+
+    func quit() {
+        if isConnected, let cli = locateCLI() {
+            runInTerminal(cli, args: ["disconnect"])
+        }
+        NSApp.terminate(nil)
     }
 
     func toggleLaunchAtLogin() {

@@ -75,7 +75,7 @@ struct MenuContent: View {
         Divider()
 
         Button("About Cloudnetip SPN") { controller.showAbout() }
-        Button("Quit Cloudnetip SPN") { NSApplication.shared.terminate(nil) }
+        Button("Quit Cloudnetip SPN") { controller.quit() }
             .keyboardShortcut("q")
     }
 }
