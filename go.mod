@@ -1,3 +1,3 @@
-module github.com/netip/netip-spn-cli
+module github.com/netip/netip-spn
 
 go 1.22

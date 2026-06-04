@@ -37,6 +37,8 @@ func main() {
 			path = os.Args[2]
 		}
 		cmdConfig(path)
+	case "auth":
+		cmdAuth(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("netip-spn", version)
 	case "help", "--help", "-h":
@@ -52,17 +54,22 @@ func printUsage() {
 	fmt.Print(`netip-spn — Cloudnetip Shared Private Network CLI
 
 Usage:
+  netip-spn auth login           Sign in via browser, choose SPN, save config
+  netip-spn auth logout          Remove saved config
   netip-spn connect              Bring SPN tunnel up
   netip-spn disconnect           Bring SPN tunnel down
   netip-spn status               Show tunnel state
   netip-spn stats                Print connection stats as JSON (since/rx/tx)
-  netip-spn config [path]        Set config file (opens file picker if path omitted)
+  netip-spn config [path]        Set config file from local path (file picker if omitted)
   netip-spn version              Print version
 
 Config:
   User config directory:  ~/.cloudnetip/
   Config file:            ~/.cloudnetip/spn.conf
   Tunnel interface name:  ` + tunnelName + `
+
+Environment:
+  NETIP_API_URL                  Override API base URL (dev/staging)
 
 Requires: wireguard-tools (brew install wireguard-tools)
 `)
@@ -171,12 +178,28 @@ func findWGUtun() string {
 	return ""
 }
 
+func cmdAuth(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: netip-spn auth <login|logout>")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "login":
+		cmdAuthLogin()
+	case "logout":
+		cmdAuthLogout()
+	default:
+		fmt.Fprintf(os.Stderr, "unknown auth subcommand: %s\n", args[0])
+		os.Exit(2)
+	}
+}
+
 func cmdConnect() {
 	requireWireGuard()
 
 	src := userConfigPath()
 	if _, err := os.Stat(src); err != nil {
-		fail("no config found at %s\n   Run: netip-spn config <path-to-spn.conf>", src)
+		fail("no config found at %s\n   Run: netip-spn auth login (or: netip-spn config <path>)", src)
 	}
 
 	if _, err := os.Stat(runtimeName); err == nil {
@@ -256,8 +279,7 @@ func cmdConfig(path string) {
 	if err := os.WriteFile(dst, data, 0o600); err != nil {
 		fail("cannot write %s: %v", dst, err)
 	}
-	fmt.Printf("Config saved to %s\n", dst)
-	fmt.Println("Now run: netip-spn connect")
+	fmt.Println("Config saved, now run: netip-spn connect")
 }
 
 func looksLikeWireGuardConfig(data []byte) bool {

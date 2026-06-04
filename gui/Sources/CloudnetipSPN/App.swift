@@ -3,10 +3,11 @@ import SwiftUI
 @main
 struct CloudnetipSPNApp: App {
     @StateObject private var controller = SPNController()
+    @StateObject private var auth = AuthService()
 
     var body: some Scene {
         MenuBarExtra {
-            MenuContent(controller: controller)
+            MenuContent(controller: controller, auth: auth)
         } label: {
             Image(systemName: controller.isConnected ? "cloud.fill" : "cloud")
         }
@@ -16,6 +17,7 @@ struct CloudnetipSPNApp: App {
 
 struct MenuContent: View {
     @ObservedObject var controller: SPNController
+    @ObservedObject var auth: AuthService
 
     var body: some View {
         if let err = controller.error {
@@ -42,6 +44,18 @@ struct MenuContent: View {
         }
 
         Divider()
+
+        if auth.hasConfig {
+            Button("Sign out") {
+                auth.logout()
+                controller.refresh()
+            }
+        } else {
+            Button(auth.inProgress ? "Signing in…" : "Sign in…") {
+                AuthFlowPresenter.start(auth: auth, controller: controller)
+            }
+            .disabled(auth.inProgress)
+        }
 
         Button("Choose config…") { controller.chooseConfig() }
         if controller.hasConfig {
