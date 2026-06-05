@@ -15,7 +15,8 @@ brew install cloudnetip-spn          # CLI only
 brew install --cask cloudnetip-spn   # GUI + CLI (the cask depends on the formula)
 ```
 
-The cask is the recommended install: you get `Cloudnetip SPN.app` in `/Applications` plus the `netip-spn` command in your PATH, ready to go.
+The cask is the recommended install: you get `Cloudnetip SPN.app` in `/Applications` plus the `netip-spn` command in
+your PATH, ready to go.
 
 The .app is ad-hoc signed and shipped through brew, so Gatekeeper does not flag it. No Apple Developer account required.
 
@@ -40,17 +41,20 @@ netip-spn status                         # check state (no sudo needed)
 netip-spn disconnect                     # bring tunnel down
 ```
 
-The menubar app provides the same actions plus auto-refreshing status. Connect/Disconnect launch a Terminal window so you can enter your sudo password.
+The menubar app provides the same actions plus auto-refreshing status. Connect/Disconnect launch a Terminal window so
+you can enter your sudo password.
 
 ## Where files live
 
-| Path                                | Purpose                                  |
-|-------------------------------------|------------------------------------------|
-| `~/.cloudnetip/spn.conf`            | Your saved WireGuard config (mode 600)   |
-| `~/.cloudnetip/wg-netip.conf`       | Deployed copy used by `wg-quick`         |
-| `/var/run/wireguard/wg-netip.name`  | Created by wg-quick when tunnel is up    |
+| Path                               | Purpose                                |
+|------------------------------------|----------------------------------------|
+| `~/.cloudnetip/spn.conf`           | Your saved WireGuard config (mode 600) |
+| `~/.cloudnetip/wg-netip.conf`      | Deployed copy used by `wg-quick`       |
+| `/var/run/wireguard/wg-netip.name` | Created by wg-quick when tunnel is up  |
 
-`netip-spn config` validates the file has an `[Interface]` section and copies it into `~/.cloudnetip/`. Every `connect` re-deploys the saved config to `~/.cloudnetip/wg-netip.conf`, so editing `~/.cloudnetip/spn.conf` is enough — no need to re-run `config`.
+`netip-spn config` validates the file has an `[Interface]` section and copies it into `~/.cloudnetip/`. Every `connect`
+re-deploys the saved config to `~/.cloudnetip/wg-netip.conf`, so editing `~/.cloudnetip/spn.conf` is enough — no need to
+re-run `config`.
 
 ## Build
 
@@ -64,38 +68,57 @@ make package            # builds the .app and zips it for the cask, prints sha25
 make release-assets     # everything needed for a release
 ```
 
-## Repository layout
+## Local development
 
+Build the current source as both CLI and GUI and run them against your real
+config — no brew round-trip required.
+
+```bash
+make dev-cli   # builds the CLI and installs it to /usr/local/bin/netip-spn (sudo)
+make dev-app   # builds the native-arch .app, kills any running instance, opens the fresh one
+make dev       # both: rebuild CLI + GUI, reinstall, relaunch
 ```
-.
-├── main.go                       CLI entry
-├── picker_darwin.go              osascript file picker
-├── picker_linux.go               zenity/kdialog file picker
-├── go.mod
-├── Makefile
-├── gui/                          SwiftUI menubar app
-│   ├── Package.swift
-│   ├── Sources/CloudnetipSPN/
-│   ├── Resources/Info.plist
-│   └── build-app.sh              wraps the executable into .app bundle, ad-hoc signs
-├── Formula/                      Reference formula — copy into the tap repo
-│   └── cloudnetip-spn.rb
-└── Casks/                        Reference cask — copy into the tap repo
-    └── cloudnetip-spn.rb
+
+The GUI locates the CLI via `locateCLI()` and checks `/opt/homebrew/bin`,
+`/usr/local/bin`, `/usr/bin` in that order. To make the dev build win,
+`make dev-cli` runs `brew unlink cloudnetip-spn` (no-op if not installed)
+and then installs the dev binary to `/usr/local/bin/netip-spn`.
+`make dev-clean` reverses both steps with `brew link --overwrite`.
+
+If the GUI still shows the brew version in its menu, restart the .app
+(`make dev-app` does this) — `locateCLI()` is called per launch.
+
+### GUI OSX logs:
+
+```bash
+log stream --predicate 'process == "CloudnetipSPN"' --level debug
 ```
+
+### Going back to brew
+
+```bash
+make dev-clean   # disconnect, quit GUI, remove dev CLI + .app + build outputs
+brew install --cask cloudnetip/tap/cloudnetip-spn
+```
+
+`dev-clean` does not touch anything under `/opt/homebrew` or `/Applications` —
+only the dev artifacts this Makefile created.
 
 ## Publishing to Homebrew
 
 You need two GitHub repos under the `cloudnetip` org:
 
 1. **`github.com/cloudnetip/netip-spn`** — this repository (source)
-2. **`github.com/cloudnetip/homebrew-tap`** — the tap (Homebrew requires the `homebrew-` prefix; the tap is then referenced as `cloudnetip/tap`). One tap holds all Cloudnetip formulas/casks (cloudnetip-spn now, more later).
+2. **`github.com/cloudnetip/homebrew-tap`** — the tap (Homebrew requires the `homebrew-` prefix; the tap is then
+   referenced as `cloudnetip/tap`). One tap holds all Cloudnetip formulas/casks (cloudnetip-spn now, more later).
 
 ### One-time setup
 
-Create the tap repo on GitHub: **`github.com/cloudnetip/homebrew-tap`**. Initialize it empty — the release script will populate it on the first run.
+Create the tap repo on GitHub: **`github.com/cloudnetip/homebrew-tap`**. Initialize it empty — the release script will
+populate it on the first run.
 
-By default the script clones the tap into `<repo>/.tap/homebrew-tap` (gitignored), so you don't need to manage a separate sibling directory. To use a different location, set `TAP_REPO=/path/to/clone`.
+By default the script clones the tap into `<repo>/.tap/homebrew-tap` (gitignored), so you don't need to manage a
+separate sibling directory. To use a different location, set `TAP_REPO=/path/to/clone`.
 
 ### Cutting a release
 
@@ -104,6 +127,7 @@ make release VERSION=0.1.0
 ```
 
 That's it. The script does everything:
+
 - Builds the universal .app and zips it
 - Tags and pushes `v0.1.0`
 - Creates a GitHub Release with the .app zip attached
@@ -113,11 +137,13 @@ That's it. The script does everything:
 - Clones (or pulls) the tap into `.tap/homebrew-tap` (gitignored), copies the formulas, commits and pushes
 
 **Dry run** (prints actions without pushing):
+
 ```bash
 make release VERSION=0.1.0 DRY_RUN=1
 ```
 
 **Manual invocation** (if you prefer):
+
 ```bash
 ./scripts/brew-release v0.1.0
 ```
@@ -134,8 +160,11 @@ The cask installs both the GUI (`Cloudnetip SPN.app` in `/Applications`) and the
 
 ## Why no Apple Developer cert is needed
 
-- **CLI**: the formula builds Go code from source on the user's machine. Locally-built binaries have no `com.apple.quarantine` attribute, so Gatekeeper does not check them.
-- **GUI**: `build-app.sh` builds a universal binary and ad-hoc signs it (`codesign --force --deep --sign -`). Apple Silicon requires *some* signature for executables to launch; ad-hoc satisfies that without a paid certificate. Brew installs the .app via cask, which strips the quarantine attribute on its way to `/Applications`.
+- **CLI**: the formula builds Go code from source on the user's machine. Locally-built binaries have no
+  `com.apple.quarantine` attribute, so Gatekeeper does not check them.
+- **GUI**: `build-app.sh` builds a universal binary and ad-hoc signs it (`codesign --force --deep --sign -`). Apple
+  Silicon requires *some* signature for executables to launch; ad-hoc satisfies that without a paid certificate. Brew
+  installs the .app via cask, which strips the quarantine attribute on its way to `/Applications`.
 
 ## License
 

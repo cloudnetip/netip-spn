@@ -318,7 +318,9 @@ func fail(format string, a ...any) {
 }
 
 // injectDNSHooks parses the WireGuard config and injects PostUp/PreDown hooks
-// to set DNS via /etc/resolver/ (macOS split DNS), ensuring DNS works reliably.
+// that register our DNS in the scutil DynamicStore. This wins over DNS pushed
+// by the official WireGuard.app (NEDNSSettings) and adds search domains so
+// bare hostnames (e.g. "krl-2") resolve via the VPN DNS.
 func injectDNSHooks(config string) string {
 	lines := strings.Split(config, "\n")
 	var result []string
@@ -391,20 +393,29 @@ func injectDNSHooks(config string) string {
 					}
 				}
 
-				var hooks []string
-				// Create resolver files for each search domain
-				for _, domain := range searchDomains {
-					resolverFile := fmt.Sprintf("/etc/resolver/%s", domain)
-					// PostUp: create resolver file
-					postUp := fmt.Sprintf("mkdir -p /etc/resolver && printf 'nameserver %s\\n' > %s",
-						dnsServers[0], resolverFile)
-					hooks = append(hooks, fmt.Sprintf("PostUp = %s", postUp))
-				}
-
-				// PreDown: remove resolver files
-				for _, domain := range searchDomains {
-					resolverFile := fmt.Sprintf("/etc/resolver/%s", domain)
-					hooks = append(hooks, fmt.Sprintf("PreDown = rm -f %s", resolverFile))
+				// Register DNS via scutil DynamicStore. SupplementalMatchDomains
+				// includes an empty string ("") as a catch-all match — the same
+				// trick the official WireGuard.app uses with NEDNSSettings
+				// matchDomains:[""]. This routes ALL queries (including bare
+				// hostnames like "krl-2") to our DNS, which knows both short
+				// internal names and forwards public queries upstream.
+				//
+				// We do NOT add SearchDomains here: with the bare-name catch-all
+				// already routing to our resolver, suffix expansion would only
+				// cause spurious NXDOMAIN lookups for non-existent FQDNs.
+				domains := `"" ` + strings.Join(searchDomains, " ")
+				scutilKey := "State:/Network/Service/cloudnetip-spn/DNS"
+				postUpCmd := fmt.Sprintf(
+					"printf 'd.init\\nd.add ServerAddresses * %s\\nd.add SupplementalMatchDomains * %s\\nd.add SearchOrder # 1\\nset %s\\nquit\\n' | scutil",
+					dnsServers[0], domains, scutilKey,
+				)
+				preDownCmd := fmt.Sprintf(
+					"printf 'remove %s\\nquit\\n' | scutil",
+					scutilKey,
+				)
+				hooks := []string{
+					fmt.Sprintf("PostUp = %s", postUpCmd),
+					fmt.Sprintf("PreDown = %s", preDownCmd),
 				}
 
 				// Insert hooks
