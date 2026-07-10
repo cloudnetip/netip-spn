@@ -343,7 +343,13 @@ func injectDNSHooks(config string) string {
 			inInterface = false
 		}
 
-		// Extract DNS servers from Interface section
+		// Extract DNS servers from Interface section, then DROP the line.
+		// Keeping "DNS =" in the config makes wg-quick manage DNS itself via
+		// `networksetup -setdnsservers`, which hard-writes our VPN DNS into
+		// every network service (Wi-Fi, LAN, ...) on up and "restores" a
+		// possibly-stale value on down — leaving the VPN DNS stuck in every
+		// interface after disconnect. We manage DNS exclusively through the
+		// scutil DynamicStore hooks below, so the DNS line must not survive.
 		if inInterface && strings.HasPrefix(trimmed, "DNS") {
 			parts := strings.SplitN(trimmed, "=", 2)
 			if len(parts) == 2 {
@@ -356,6 +362,8 @@ func injectDNSHooks(config string) string {
 					}
 				}
 			}
+			// Do not carry the DNS line into the emitted config.
+			continue
 		}
 
 		// Check if PostUp/PreDown already exist
