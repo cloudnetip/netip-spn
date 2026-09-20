@@ -39,6 +39,10 @@ if [ -f "Resources/AppIcon.icns" ]; then
     cp "Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 fi
 
+if [ -f "Resources/MenuBarIconTemplate.png" ]; then
+    cp "Resources/MenuBarIconTemplate.png" "$APP/Contents/Resources/MenuBarIconTemplate.png"
+fi
+
 echo "==> ad-hoc signing"
 codesign --force --deep --sign - "$APP"
 
