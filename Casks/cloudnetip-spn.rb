@@ -8,7 +8,7 @@ cask "cloudnetip-spn" do
   homepage "https://github.com/cloudnetip/netip-spn"
 
   depends_on formula: "cloudnetip/tap/cloudnetip-spn"
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura
 
   app "Cloudnetip SPN.app"
 

@@ -45,12 +45,7 @@ struct MenuContent: View {
 
         Divider()
 
-        if auth.hasConfig {
-            Button("Sign out") {
-                auth.logout()
-                controller.refresh()
-            }
-        } else {
+        if !auth.hasConfig {
             Button(auth.inProgress ? "Signing in…" : "Sign in…") {
                 AuthFlowPresenter.start(auth: auth, controller: controller)
             }
@@ -73,6 +68,13 @@ struct MenuContent: View {
             .keyboardShortcut("r")
 
         Divider()
+
+        if auth.hasConfig {
+            Button("Sign out") {
+                auth.logout()
+                controller.refresh()
+            }
+        }
 
         Button("About Cloudnetip SPN") { controller.showAbout() }
         Button("Quit Cloudnetip SPN") { controller.quit() }
