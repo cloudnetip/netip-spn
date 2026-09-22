@@ -14,6 +14,8 @@ final class SPNController: ObservableObject {
     @Published var launchAtLogin: Bool = SPNController.readLaunchAtLogin()
 
     private var pollTimer: Timer?
+    private var fastPollTimer: Timer?
+    private var fastPollEnd: Date?
 
     init() {
         applyLaunchAtLogin(launchAtLogin)
@@ -117,11 +119,34 @@ final class SPNController: ObservableObject {
     func connect() {
         guard hasConfig, let cli = locateCLI() else { return }
         runInTerminal(cli, args: ["connect"])
+        startFastPolling()
     }
 
     func disconnect() {
         guard let cli = locateCLI() else { return }
+        isConnected = false
+        statusLine = "SPN: Disconnected"
+        statusDetail = nil
+        trafficLine = nil
         runInTerminal(cli, args: ["disconnect"])
+        startFastPolling()
+    }
+
+    private func startFastPolling() {
+        fastPollTimer?.invalidate()
+        fastPollEnd = Date().addingTimeInterval(30)
+        fastPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.fastPollTick() }
+        }
+    }
+
+    private func fastPollTick() {
+        refresh()
+        if let end = fastPollEnd, Date() >= end {
+            fastPollTimer?.invalidate()
+            fastPollTimer = nil
+            fastPollEnd = nil
+        }
     }
 
     func chooseConfig() {

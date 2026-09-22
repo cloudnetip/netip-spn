@@ -10,14 +10,16 @@ struct CloudnetipSPNApp: App {
         MenuBarExtra {
             MenuContent(controller: controller, auth: auth)
         } label: {
-            MenuBarIcon()
+            MenuBarIcon(isConnected: controller.isConnected)
         }
         .menuBarExtraStyle(.menu)
     }
 }
 
 private struct MenuBarIcon: View {
-    private static let image: NSImage? = {
+    var isConnected: Bool
+
+    private static let baseImage: NSImage? = {
         guard
             let url = Bundle.main.url(
                 forResource: "MenuBarIconTemplate",
@@ -33,12 +35,30 @@ private struct MenuBarIcon: View {
         return image
     }()
 
+    private static let fadedImage: NSImage? = {
+        guard let base = baseImage else { return nil }
+        let size = base.size
+        let faded = NSImage(size: size)
+        faded.lockFocus()
+        base.draw(
+            in: NSRect(origin: .zero, size: size),
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 0.35
+        )
+        faded.unlockFocus()
+        faded.size = size
+        faded.isTemplate = true
+        return faded
+    }()
+
     var body: some View {
-        if let image = Self.image {
+        if let image = isConnected ? Self.baseImage : Self.fadedImage {
             Image(nsImage: image)
                 .renderingMode(.template)
         } else {
             Image(systemName: "cloud")
+                .opacity(isConnected ? 1.0 : 0.35)
         }
     }
 }
