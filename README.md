@@ -3,7 +3,8 @@
 CLI and macOS menubar app to bring the Cloudnetip Shared Private Network up and down.
 
 - **CLI** (`netip-spn`) — Go, runs on **macOS** and **Linux**.
-- **GUI** (`Cloudnetip SPN.app`) — SwiftUI menubar app, **macOS only**. Shells out to the CLI; no duplicated logic.
+- **GUI** (`Cloudnetip SPN.app`) — SwiftUI menubar app, **macOS only**. Uses the CLI for account/config/status work and
+  a bundled WireGuard runtime for tunnel operations.
 
 ## Install
 
@@ -16,7 +17,8 @@ brew install --cask cloudnetip-spn   # GUI + CLI (the cask depends on the formul
 ```
 
 The cask is the recommended install: you get `Cloudnetip SPN.app` in `/Applications` plus the `netip-spn` command in
-your PATH, ready to go.
+your PATH, ready to go. On macOS the persistent SPN config is stored as a root-owned file under
+`/Library/Application Support/Cloudnetip SPN/`; changing or removing it requires administrator authorization.
 
 The .app is ad-hoc signed and shipped through brew, so Gatekeeper does not flag it. No Apple Developer account required.
 
@@ -36,43 +38,67 @@ The GUI is macOS-only by design. On Linux, use the CLI directly or wrap it in a 
 ```bash
 netip-spn config ~/Downloads/spn.conf   # save your WireGuard config
 netip-spn config                         # …or open a native file picker
-netip-spn connect                        # bring tunnel up (asks for admin auth by default)
+netip-spn connect                        # CLI tunnel via Homebrew/system wg-quick (sudo)
 netip-spn status                         # check state (no sudo needed)
-netip-spn disconnect                     # bring tunnel down
-netip-spn sudoers                        # one-time setup: no password on future connect/disconnect
-netip-spn sudoers check                  # show passwordless mode state
-netip-spn sudoers remove                 # disable passwordless mode
+netip-spn disconnect                     # CLI tunnel down via wg-quick (sudo)
+netip-spn sudoers                        # install/update the GUI privileged runtime manually
+netip-spn sudoers check                  # show GUI helper/runtime state
+netip-spn sudoers remove                 # remove the GUI helper/runtime
 ```
 
-The menubar app provides the same actions plus auto-refreshing status. On the first Connect it asks for macOS
-administrator authorization once and installs the root-owned helper plus the tightly scoped sudoers rule. The same
-Connect then continues automatically. Future Connect/Disconnect actions use that helper with `sudo -n` and do not ask
-for the password again. There is no separate passwordless toggle in the GUI. `Show stats in bar` is off by default;
-when enabled, the two menubar rates refresh once per second. `Show logs` opens the captured WireGuard/wg-quick
-connect and disconnect output.
+The menubar app has its own pinned WireGuard runtime. On the first Connect it asks for macOS administrator
+authorization once and copies the bundled `wg` and `wireguard-go` binaries together with the root-owned helper into
+`/Library/PrivilegedHelperTools/cloudnetip-spn/`. Future Connect/Disconnect actions use only that root-owned runtime
+through the tightly scoped sudoers rule and do not ask for a password again.
+
+The GUI does not use `wg-quick`. The helper creates the macOS `utun` with `wireguard-go`, applies the WireGuard config
+with the bundled `wg`, configures addresses/MTU/routes with macOS system tools, and publishes/removes the VPN DNS entry
+through `scutil`. Homebrew `wireguard-tools` remains a dependency of the CLI formula only. The cask still depends on the
+formula because the GUI uses `netip-spn` for auth/config/status operations.
+
+The privileged runtime has an independent pinned runtime ID defined by `wireguard-runtime.conf`. Normal GUI/CLI app
+updates do not touch it. If `wg` or `wireguard-go` is intentionally bumped, the new app detects the runtime mismatch
+and asks for administrator authorization once on the next Connect to replace the root-owned runtime. During that
+one-time privileged upgrade, an existing `~/.cloudnetip/spn.conf` is migrated into the root-owned macOS config location
+and the legacy `~/.cloudnetip` directory is removed. The GUI moves the old `wireguard.log` to
+`~/Library/Logs/Cloudnetip SPN/` before that migration. `Show stats in bar` is off by default; when enabled, the two
+menubar rates refresh once per second. `Show logs` opens captured tunnel logs.
 
 ## Where files live
 
-| Path                               | Purpose                                |
-|------------------------------------|----------------------------------------|
-| `~/.cloudnetip/spn.conf`           | Your saved WireGuard config (mode 600) |
-| `~/.cloudnetip/wireguard.log`      | GUI-captured WireGuard connect/disconnect log (mode 600) |
-| `/var/run/netip-spn/wg-netip.conf` | Root-owned sanitized config used by `wg-quick` while connecting |
-| `/var/run/wireguard/wg-netip.name` | Created by wg-quick when tunnel is up  |
+| Path                                                            | Purpose                                              |
+|-----------------------------------------------------------------|------------------------------------------------------|
+| `/Library/Application Support/Cloudnetip SPN/spn.conf`          | Root-owned persistent SPN config on macOS (mode 600) |
+| `~/Library/Logs/Cloudnetip SPN/wireguard.log`                   | GUI-captured connect/disconnect log (mode 600)       |
+| `/Library/PrivilegedHelperTools/cloudnetip-spn/helper`          | Root-owned GUI networking helper                     |
+| `/Library/PrivilegedHelperTools/cloudnetip-spn/wg`              | Root-owned bundled `wg` used only by the GUI         |
+| `/Library/PrivilegedHelperTools/cloudnetip-spn/wireguard-go`    | Root-owned bundled userspace WireGuard engine        |
+| `/Library/PrivilegedHelperTools/cloudnetip-spn/runtime.version` | Installed GUI WireGuard runtime ID                   |
+| `/var/run/netip-spn/wg-netip.conf`                              | Root-owned `wg setconf` payload while connected      |
+| `/var/run/netip-spn/state.json`                                 | Routes/interface state created by the GUI helper     |
+| `/var/run/wireguard/wg-netip.name`                              | Actual `utun` selected by bundled `wireguard-go`     |
 
-`netip-spn config` validates the file has an `[Interface]` section and copies it into `~/.cloudnetip/`. Every connect
-rebuilds a root-owned runtime config from that source. User-supplied wg-quick shell hooks (`PreUp`, `PostUp`, `PreDown`,
-`PostDown`) are stripped before privileged execution; Cloudnetip's fixed DNS hooks are then generated from validated IPs.
+On macOS, `netip-spn config` and `netip-spn auth login` validate the WireGuard config and then request administrator
+authorization to replace the root-owned persistent config atomically. The GUI helper reads only that fixed root-owned
+config path; no user-writable config path is accepted by the passwordless helper. Linux keeps the existing per-user
+`~/.cloudnetip/spn.conf` layout. The CLI keeps its traditional `wg-quick` path; its temporary privileged config strips
+user shell hooks before execution.
 
-### Passwordless helper security
+### GUI privileged runtime
 
-The GUI installs the same helper used by `netip-spn sudoers` automatically on the first Connect. It does **not** grant
-`NOPASSWD` directly to `wg-quick` with a user-writable config. Instead it installs a root-owned helper
-(`/Library/PrivilegedHelperTools/com.cloudnetip.spn.helper` on macOS) and allows only its exact internal `up`/`down`
-commands for the current user's SPN config. This prevents user-controlled WireGuard hooks from becoming arbitrary
-passwordless root execution. The helper also exposes WireGuard's read-only per-peer transfer counters so the GUI can
-show tunnel RX/TX without relying on macOS utun accounting. `netip-spn sudoers remove` removes the helper; the next GUI
-Connect will install it again.
+The GUI sudoers rule never grants `NOPASSWD` to Homebrew `wg`, `wg-quick`, a shell, or an arbitrary executable. It
+allows only the root-owned helper's exact internal `check`, `up`, and `down` operations, with no path arguments at all.
+The helper always reads `/Library/Application Support/Cloudnetip SPN/spn.conf`, which is owned by root and mode 600. The
+helper itself can execute only the root-owned `wg` and `wireguard-go` copied from the application bundle during an
+administrator-authorized install/update.
+
+The GUI networking path intentionally does not use user-supplied `PreUp`, `PostUp`, `PreDown`, `PostDown`, or
+`SaveConfig`. `Address`, `DNS`, `MTU`, and `Table` are parsed by the helper and applied directly; the remaining
+WireGuard
+keys are sent to `wg setconf`. This keeps passwordless root execution away from arbitrary config shell hooks.
+
+The CLI stays conventional: `netip-spn connect/disconnect` uses the `wireguard-tools` installation supplied by the
+platform/Homebrew and requests sudo normally. The bundled runtime is a GUI implementation detail.
 
 ## Build
 
@@ -80,7 +106,8 @@ Connect will install it again.
 make build              # CLI for current platform
 make build-darwin       # CLI for darwin/{arm64,amd64} into dist/
 make build-linux        # CLI for linux/{arm64,amd64} into dist/
-make app                # universal arm64+x86_64 Cloudnetip SPN.app
+make wireguard-runtime  # build the pinned universal GUI wg + wireguard-go runtime
+make app                # universal app, including the pinned WireGuard runtime
 make app-dev            # native-arch only (faster iteration)
 make package            # builds the .app and zips it for the cask, prints sha256
 make release-assets     # everything needed for a release
@@ -146,11 +173,12 @@ make release VERSION=0.1.0
 
 That's it. The script does everything:
 
-- Builds the universal .app and zips it
+- Builds the pinned universal WireGuard GUI runtime, then the universal .app and zip
 - Tags and pushes `v0.1.0`
 - Creates a GitHub Release with the .app zip attached
 - Computes sha256 of the source tarball and .app zip
 - Patches `Formula/cloudnetip-spn.rb` and `Casks/cloudnetip-spn.rb` with the new version + sha256s
+- Keeps the WireGuard runtime version unchanged unless `wireguard-runtime.conf` was explicitly bumped
 - Commits and pushes the patched files to this repo
 - Clones (or pulls) the tap into `.tap/homebrew-tap` (gitignored), copies the formulas, commits and pushes
 

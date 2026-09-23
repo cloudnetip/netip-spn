@@ -34,6 +34,7 @@ final class SPNController: ObservableObject {
 
     init() {
         applyLaunchAtLogin(launchAtLogin)
+        migrateLegacyConnectionLog()
         refresh()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
@@ -44,8 +45,11 @@ final class SPNController: ObservableObject {
     }
 
     func refresh() {
-        let configPath = (NSString(string: "~/.cloudnetip/spn.conf").expandingTildeInPath)
-        hasConfig = FileManager.default.fileExists(atPath: configPath)
+        let configPath = "/Library/Application Support/Cloudnetip SPN/spn.conf"
+        let legacyConfig = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cloudnetip/spn.conf").path
+        hasConfig = FileManager.default.fileExists(atPath: configPath) ||
+            FileManager.default.fileExists(atPath: legacyConfig)
 
         guard let cli = locateCLI() else {
             isConnected = false
@@ -197,40 +201,48 @@ final class SPNController: ObservableObject {
     }
 
     func connect() {
-        guard hasConfig, let cli = locateCLI() else { return }
-        withPasswordlessHelper(cli: cli) { [weak self] ready in
+        guard hasConfig, locateCLI() != nil else { return }
+        withPasswordlessHelper { [weak self] ready in
             guard let self, ready else { return }
-            self.runTunnelCommand(cli, args: ["connect"])
+            self.runTunnelCommand("up")
         }
     }
 
     func disconnect() {
-        guard let cli = locateCLI() else { return }
+        guard locateCLI() != nil else { return }
         isConnected = false
         statusLine = "SPN: Disconnected"
         statusDetail = nil
         resetTrafficStats()
-        withPasswordlessHelper(cli: cli) { [weak self] ready in
+        withPasswordlessHelper { [weak self] ready in
             guard let self, ready else {
                 self?.refresh()
                 return
             }
-            self.runTunnelCommand(cli, args: ["disconnect"])
+            self.runTunnelCommand("down")
         }
     }
 
-    private func withPasswordlessHelper(cli: String, completion: @escaping (Bool) -> Void) {
-        if passwordlessHelperIsActive(cli: cli) {
+    private func withPasswordlessHelper(completion: @escaping (Bool) -> Void) {
+        if passwordlessHelperIsActive() {
             completion(true)
+            return
+        }
+
+        guard let runtimeDir = bundledWireGuardRuntimeDirectory(),
+              let installer = bundledPrivilegedHelperPath()
+        else {
+            presentError("Bundled WireGuard runtime is missing from Cloudnetip SPN.app.")
+            completion(false)
             return
         }
 
         let username = NSUserName()
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let prompt = "Cloudnetip SPN needs your administrator password once to install its secure networking helper. Future Connect and Disconnect actions will not ask for a password."
+        let prompt = "Cloudnetip SPN needs your administrator password to install or update its WireGuard networking runtime. Future Connect and Disconnect actions will not ask for a password until that runtime changes."
         runAsAdministrator(
-            cli,
-            args: ["_sudoers-install", username, home],
+            installer,
+            args: ["_sudoers-install", username, home, runtimeDir],
             prompt: prompt
         ) { [weak self] result in
             guard let self else { return }
@@ -242,7 +254,7 @@ final class SPNController: ObservableObject {
                 completion(false)
                 return
             }
-            guard self.passwordlessHelperIsActive(cli: cli) else {
+            guard self.passwordlessHelperIsActive() else {
                 self.presentError("Administrator access was granted, but the passwordless helper could not be verified.")
                 completion(false)
                 return
@@ -251,15 +263,54 @@ final class SPNController: ObservableObject {
         }
     }
 
-    private func passwordlessHelperIsActive(cli: String) -> Bool {
-        let result = run(cli, args: ["sudoers", "check"])
-        return result.exitCode == 0 && result.stdout.contains("sudoers: enabled")
+    private func bundledWireGuardRuntimeDirectory() -> String? {
+        guard let resources = Bundle.main.resourceURL else { return nil }
+        let url = resources.appendingPathComponent("WireGuard", isDirectory: true)
+        let version = url.appendingPathComponent("runtime.version").path
+        let helper = url.appendingPathComponent("helper").path
+        let wg = url.appendingPathComponent("wg").path
+        let wireGuardGo = url.appendingPathComponent("wireguard-go").path
+        guard FileManager.default.fileExists(atPath: version),
+              FileManager.default.isExecutableFile(atPath: helper),
+              FileManager.default.isExecutableFile(atPath: wg),
+              FileManager.default.isExecutableFile(atPath: wireGuardGo)
+        else { return nil }
+        return url.path
     }
 
-    private func runTunnelCommand(_ cli: String, args: [String]) {
-        runAsync(cli, args: args) { [weak self] result in
+    private func bundledPrivilegedHelperPath() -> String? {
+        guard let runtime = bundledWireGuardRuntimeDirectory() else { return nil }
+        return URL(fileURLWithPath: runtime).appendingPathComponent("helper").path
+    }
+
+    private func bundledWireGuardRuntimeVersion() -> String? {
+        guard let runtime = bundledWireGuardRuntimeDirectory() else { return nil }
+        let path = URL(fileURLWithPath: runtime).appendingPathComponent("runtime.version")
+        return try? String(contentsOf: path, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func passwordlessHelperIsActive() -> Bool {
+        guard let expected = bundledWireGuardRuntimeVersion(), !expected.isEmpty else { return false }
+        let result = run(
+            "/usr/bin/sudo",
+            args: ["-n", "/Library/PrivilegedHelperTools/cloudnetip-spn/helper", "_privileged", "check"]
+        )
+        return result.exitCode == 0 &&
+            result.stdout.contains("privileged-helper: ready stats-v3") &&
+            result.stdout.contains("runtime=\(expected)")
+    }
+
+    private func runTunnelCommand(_ action: String) {
+        let args = [
+            "-n",
+            "/Library/PrivilegedHelperTools/cloudnetip-spn/helper",
+            "_privileged",
+            action,
+        ]
+        runAsync("/usr/bin/sudo", args: args) { [weak self] result in
             guard let self else { return }
-            self.appendConnectionLog(command: args.joined(separator: " "), result: result)
+            self.appendConnectionLog(command: "gui \(action)", result: result)
             if result.exitCode != 0 {
                 self.presentError(result.stderr.isEmpty ? result.stdout : result.stderr)
             }
@@ -279,7 +330,7 @@ final class SPNController: ObservableObject {
         trafficLine = nil
     }
 
-    func chooseConfig() {
+    func chooseConfig(completion: (() -> Void)? = nil) {
         let panel = NSOpenPanel()
         panel.title = "Select SPN config"
         panel.allowedContentTypes = []
@@ -289,18 +340,43 @@ final class SPNController: ObservableObject {
         panel.allowsMultipleSelection = false
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard let cli = locateCLI() else { return }
-        let result = run(cli, args: ["config", url.path])
-        if result.exitCode != 0 {
-            presentError(result.stderr.isEmpty ? result.stdout : result.stderr)
+        guard let installer = bundledPrivilegedHelperPath() else {
+            presentError("Bundled privileged helper is missing from Cloudnetip SPN.app.")
             return
         }
-        refresh()
-    }
 
-    func revealConfig() {
-        let path = (NSString(string: "~/.cloudnetip/spn.conf").expandingTildeInPath)
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+        let stagedConfig = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cloudnetip-spn-\(UUID().uuidString).conf")
+        do {
+            let data = try Data(contentsOf: url)
+            try data.write(to: stagedConfig, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: stagedConfig.path
+            )
+        } catch {
+            presentError("Cannot read selected config: \(error.localizedDescription)")
+            return
+        }
+
+        runAsAdministrator(
+            installer,
+            args: ["_config-install", stagedConfig.path],
+            prompt: "Cloudnetip SPN needs administrator permission to store the VPN configuration as a protected root-owned file."
+        ) { [weak self] result in
+            try? FileManager.default.removeItem(at: stagedConfig)
+            guard let self else { return }
+            if result.exitCode != 0 {
+                let message = result.stderr.isEmpty ? result.stdout : result.stderr
+                if !self.wasAuthorizationCancelled(message) { self.presentError(message) }
+                return
+            }
+            let legacyDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".cloudnetip", isDirectory: true)
+            try? FileManager.default.removeItem(at: legacyDir)
+            self.refresh()
+            completion?()
+        }
     }
 
     func showAbout() {
@@ -790,8 +866,21 @@ final class SPNController: ObservableObject {
 
     private func connectionLogURL() -> URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cloudnetip", isDirectory: true)
+            .appendingPathComponent("Library/Logs/Cloudnetip SPN", isDirectory: true)
             .appendingPathComponent("wireguard.log")
+    }
+
+    private func migrateLegacyConnectionLog() {
+        let fm = FileManager.default
+        let old = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cloudnetip/wireguard.log")
+        guard fm.fileExists(atPath: old.path) else { return }
+        let new = connectionLogURL()
+        let dir = new.deletingLastPathComponent()
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        if !fm.fileExists(atPath: new.path) {
+            try? fm.moveItem(at: old, to: new)
+        }
     }
 
     private func appendConnectionLog(command: String, result: ProcResult) {

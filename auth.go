@@ -39,10 +39,9 @@ func userAgent() string {
 	return fmt.Sprintf("%s/%s (%s/%s)", userAgentPrefix, version, runtime.GOOS, runtime.GOARCH)
 }
 
-// cmdAuthLogin runs the loopback OAuth flow and writes the wg-quick config
-// the server returned to ~/.cloudnetip/spn.conf. There is no persistent
-// auth token: the config itself is the credential, and the user re-runs
-// `auth login` to rotate or pick a different SPN.
+// cmdAuthLogin runs the loopback OAuth flow and stores the WireGuard config.
+// On macOS the persistent config is root-owned; other platforms keep the
+// existing per-user config path.
 func cmdAuthLogin() {
 	base := apiBaseURL()
 	fmt.Printf("Authenticating to Cloudnetip SPN\n")
@@ -55,23 +54,17 @@ func cmdAuthLogin() {
 		fail("server returned data that is not a WireGuard config")
 	}
 
-	dir := userConfigDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		fail("cannot create %s: %v", dir, err)
+	if err := savePersistentConfig(conf); err != nil {
+		fail("cannot save config: %v", err)
 	}
-	if err := os.WriteFile(userConfigPath(), conf, 0o600); err != nil {
-		fail("cannot write config: %v", err)
-	}
-	fmt.Println("✓ Successful authentication, now run: netip-spn connect")
+	fmt.Printf("✓ Successful authentication; config saved to %s\n", persistentConfigPath())
+	fmt.Println("  Now run: netip-spn connect")
 }
 
 func cmdAuthLogout() {
-	if err := os.Remove(userConfigPath()); err != nil && !os.IsNotExist(err) {
-		fail("cannot remove %s: %v", userConfigPath(), err)
+	if err := removePersistentConfig(); err != nil {
+		fail("cannot remove config: %v", err)
 	}
-	// wg-quick.conf is a derived file; remove it too so a stale copy is not
-	// reused on the next `connect` after the user has signed out.
-	_ = os.Remove(userWgConfigPath())
 	fmt.Println("✓ Config removed.")
 }
 

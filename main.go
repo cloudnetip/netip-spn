@@ -46,8 +46,14 @@ func main() {
 		cmdSudoersRootInstall(os.Args[2:])
 	case "_sudoers-remove":
 		cmdSudoersRootRemove()
+	case "_config-install":
+		cmdConfigRootInstall(os.Args[2:])
+	case "_config-remove":
+		cmdConfigRootRemove()
 	case "_privileged":
 		cmdPrivileged(os.Args[2:])
+	case "_cli-privileged":
+		cmdCLIPrivileged(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("netip-spn", version)
 	case "help", "--help", "-h":
@@ -70,14 +76,14 @@ Usage:
   netip-spn status               Show tunnel state
   netip-spn stats                Print connection stats as JSON (since/rx/tx)
   netip-spn config [path]        Set config file from local path (file picker if omitted)
-  netip-spn sudoers              Enable passwordless connect/disconnect (one-time admin auth)
-  netip-spn sudoers check        Show passwordless mode state
-  netip-spn sudoers remove       Disable passwordless mode
+  netip-spn sudoers              Install/update the GUI privileged helper
+  netip-spn sudoers check        Show GUI helper state
+  netip-spn sudoers remove       Remove the GUI privileged helper
   netip-spn version              Print version
 
 Config:
-  User config directory:  ~/.cloudnetip/
-  Config file:            ~/.cloudnetip/spn.conf
+  macOS config:           /Library/Application Support/Cloudnetip SPN/spn.conf
+  Linux config:           ~/.cloudnetip/spn.conf
   Tunnel interface name:  ` + tunnelName + `
 
 Environment:
@@ -127,28 +133,19 @@ func cmdStats() {
 		fmt.Println(`{"connected":false}`)
 		return
 	}
-	utun := ""
-	if data, err := os.ReadFile(runtimeName); err == nil {
-		utun = strings.TrimSpace(string(data))
+	utun, rx, tx, ok := readPrivilegedWireGuardStats()
+	if utun == "" {
+		if data, err := os.ReadFile(runtimeName); err == nil {
+			utun = strings.TrimSpace(string(data))
+		}
 	}
 	if utun == "" {
-		// wireguard-go writes the authoritative utun name to runtimeName, but
-		// that file is root-only on macOS. Match the Address from our config to
-		// the live utun interface instead of blindly taking the first utun socket.
-		utun = findWGUtunByConfig(userConfigPath())
-	}
-	if utun == "" {
-		// Last-resort compatibility fallback for configs without Address.
 		utun = findWGUtun()
 	}
 
 	since := info.ModTime().Unix()
-	rx, tx, ok := readPrivilegedWireGuardCounters(userConfigPath())
 	counterSource := "wireguard"
 	if !ok {
-		// Fallback for older helpers or unusual installations. WireGuard's own
-		// transfer counters are preferred because they describe the tunnel
-		// itself rather than macOS' utun accounting.
 		rx, tx = readIfaceCounters(utun)
 		counterSource = "netstat"
 	}
@@ -156,24 +153,30 @@ func cmdStats() {
 		utun, since, rx, tx, counterSource)
 }
 
-func readPrivilegedWireGuardCounters(source string) (uint64, uint64, bool) {
-	cmd := exec.Command("sudo", "-n", privilegedHelperPath(), "_privileged", "check", source)
+func readPrivilegedWireGuardStats() (string, uint64, uint64, bool) {
+	cmd := exec.Command("sudo", "-n", privilegedHelperPath(), "_privileged", "check")
 	out, err := cmd.Output()
 	if err != nil {
-		return 0, 0, false
+		return "", 0, 0, false
 	}
+	var iface string
+	var rx, tx uint64
+	var haveCounters bool
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) != 3 || fields[0] != "wireguard-transfer:" {
-			continue
+		if len(fields) == 2 && fields[0] == "wireguard-interface:" {
+			iface = fields[1]
 		}
-		rx, rxErr := strconv.ParseUint(fields[1], 10, 64)
-		tx, txErr := strconv.ParseUint(fields[2], 10, 64)
-		if rxErr == nil && txErr == nil {
-			return rx, tx, true
+		if len(fields) == 3 && fields[0] == "wireguard-transfer:" {
+			parsedRX, rxErr := strconv.ParseUint(fields[1], 10, 64)
+			parsedTX, txErr := strconv.ParseUint(fields[2], 10, 64)
+			if rxErr == nil && txErr == nil {
+				rx, tx = parsedRX, parsedTX
+				haveCounters = true
+			}
 		}
 	}
-	return 0, 0, false
+	return iface, rx, tx, haveCounters
 }
 
 // readIfaceCounters parses `netstat -ibn` to get RX/TX bytes for the given
@@ -357,8 +360,11 @@ func cmdAuth(args []string) {
 
 func cmdConnect() {
 	requireWireGuard()
+	if err := ensurePersistentConfigMigrated(); err != nil {
+		fail("cannot migrate legacy config: %v", err)
+	}
 
-	src := userConfigPath()
+	src := persistentConfigPath()
 	if _, err := os.Stat(src); err != nil {
 		fail("no config found at %s\n   Run: netip-spn auth login (or: netip-spn config <path>)", src)
 	}
@@ -368,7 +374,7 @@ func cmdConnect() {
 	}
 
 	fmt.Println("Starting tunnel...")
-	runPrivileged("up", src)
+	runCLIPrivileged("up")
 	fmt.Println("● SPN: connected")
 }
 
@@ -378,28 +384,17 @@ func cmdDisconnect() {
 		return
 	}
 	requireWireGuard()
-	src := userConfigPath()
-	runPrivileged("down", src)
+	runCLIPrivileged("down")
 	fmt.Println("● SPN: disconnected")
 }
 
-func runPrivileged(action, source string) {
-	var exe string
-	var args []string
-	if activeNow() {
-		exe = privilegedHelperPath()
-		args = []string{"-n", exe, "_privileged", action, source}
-		exe = "sudo"
-	} else {
-		current, err := os.Executable()
-		if err != nil {
-			fail("cannot resolve executable path: %v", err)
-		}
-		current, _ = filepath.EvalSymlinks(current)
-		exe = "sudo"
-		args = []string{current, "_privileged", action, source}
+func runCLIPrivileged(action string) {
+	current, err := os.Executable()
+	if err != nil {
+		fail("cannot resolve executable path: %v", err)
 	}
-	cmd := exec.Command(exe, args...)
+	current, _ = filepath.EvalSymlinks(current)
+	cmd := exec.Command("sudo", current, "_cli-privileged", action)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -437,15 +432,10 @@ func cmdConfig(path string) {
 		fail("file does not look like a WireGuard config (missing [Interface] section): %s", abs)
 	}
 
-	dir := userConfigDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		fail("cannot create %s: %v", dir, err)
+	if err := savePersistentConfig(data); err != nil {
+		fail("cannot save config: %v", err)
 	}
-	dst := userConfigPath()
-	if err := os.WriteFile(dst, data, 0o600); err != nil {
-		fail("cannot write %s: %v", dst, err)
-	}
-	fmt.Println("Config saved, now run: netip-spn connect")
+	fmt.Printf("Config saved to %s, now run: netip-spn connect\n", persistentConfigPath())
 }
 
 func looksLikeWireGuardConfig(data []byte) bool {

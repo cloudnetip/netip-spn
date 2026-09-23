@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -20,58 +21,87 @@ func cmdPrivileged(args []string) {
 	if os.Geteuid() != 0 {
 		fail("_privileged must run as root")
 	}
-	if len(args) != 2 || (args[0] != "check" && args[0] != "up" && args[0] != "down") {
-		fail("usage: _privileged <check|up|down> <source-config>")
+	if len(args) != 1 || (args[0] != "check" && args[0] != "up" && args[0] != "down") {
+		fail("usage: _privileged <check|up|down>")
 	}
-	action, source := args[0], filepath.Clean(args[1])
-	if !filepath.IsAbs(source) {
-		fail("source config must be an absolute path")
-	}
+	action := args[0]
 
 	if action == "check" {
-		fmt.Println("privileged-helper: ready stats-v1")
+		if !privilegedRuntimeReady() {
+			fail("privileged WireGuard runtime is missing or outdated")
+		}
+		fmt.Printf("privileged-helper: ready stats-v3 runtime=%s\n", installedWireGuardRuntimeVersion())
+		if data, err := os.ReadFile(runtimeName); err == nil {
+			if iface := strings.TrimSpace(string(data)); iface != "" {
+				fmt.Printf("wireguard-interface: %s\n", iface)
+			}
+		}
 		if rx, tx, err := readWireGuardTransferCounters(); err == nil {
 			fmt.Printf("wireguard-transfer: %d %d\n", rx, tx)
 		}
 		return
 	}
 
+	if runtime.GOOS != "darwin" {
+		fail("bundled GUI WireGuard runtime is supported only on macOS")
+	}
+	var err error
+	if action == "up" {
+		err = privilegedRuntimeUp(darwinSystemConfigPath)
+	} else {
+		err = privilegedRuntimeDown()
+	}
+	if err != nil {
+		fail("%s failed: %v", action, err)
+	}
+}
+
+func cmdCLIPrivileged(args []string) {
+	if os.Geteuid() != 0 {
+		fail("_cli-privileged must run as root")
+	}
+	if len(args) != 1 || (args[0] != "up" && args[0] != "down") {
+		fail("usage: _cli-privileged <up|down>")
+	}
+	action := args[0]
+
 	if action == "up" {
 		if _, err := os.Stat(runtimeName); err == nil {
 			fmt.Println("SPN is already up.")
 			return
 		}
-	}
-	if action == "down" {
-		if _, err := os.Stat(runtimeName); err != nil {
-			fmt.Println("SPN is already down.")
-			return
-		}
+	} else if _, err := os.Stat(runtimeName); err != nil {
+		fmt.Println("SPN is already down.")
+		return
 	}
 
-	config, err := readAndSanitizePrivilegedConfig(source)
-	if err != nil {
-		fail("unsafe or invalid config: %v", err)
-	}
-	if err := os.MkdirAll(privilegedConfigDir, 0o700); err != nil {
-		fail("cannot create %s: %v", privilegedConfigDir, err)
-	}
-	if err := os.Chown(privilegedConfigDir, 0, 0); err != nil {
-		fail("cannot secure %s: %v", privilegedConfigDir, err)
-	}
 	cfg := privilegedConfigPath()
-	if err := os.WriteFile(cfg, []byte(config), 0o600); err != nil {
-		fail("cannot write privileged config: %v", err)
-	}
-	if err := os.Chown(cfg, 0, 0); err != nil {
-		fail("cannot secure privileged config: %v", err)
+	if action == "up" {
+		config, err := readAndSanitizePrivilegedConfig(persistentConfigPath())
+		if err != nil {
+			fail("unsafe or invalid config: %v", err)
+		}
+		if err := os.MkdirAll(privilegedConfigDir, 0o700); err != nil {
+			fail("cannot create %s: %v", privilegedConfigDir, err)
+		}
+		if err := os.Chown(privilegedConfigDir, 0, 0); err != nil {
+			fail("cannot secure %s: %v", privilegedConfigDir, err)
+		}
+		if err := os.WriteFile(cfg, []byte(config), 0o600); err != nil {
+			fail("cannot write privileged config: %v", err)
+		}
+		if err := os.Chown(cfg, 0, 0); err != nil {
+			fail("cannot secure privileged config: %v", err)
+		}
+	} else if _, err := os.Stat(cfg); err != nil {
+		fail("temporary WireGuard config is missing; cannot disconnect cleanly")
 	}
 
-	wg, err := findWgQuick()
+	wgQuick, err := findWgQuick()
 	if err != nil {
 		fail("%v. %s", err, installHint())
 	}
-	cmd := exec.Command(wg, action, cfg)
+	cmd := exec.Command(wgQuick, action, cfg)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -83,9 +113,8 @@ func cmdPrivileged(args []string) {
 }
 
 func readWireGuardTransferCounters() (uint64, uint64, error) {
-	wg, err := findWG()
-	if err != nil {
-		return 0, 0, err
+	if !privilegedRuntimeReady() {
+		return 0, 0, fmt.Errorf("privileged runtime not ready")
 	}
 	interfaceName := tunnelName
 	if data, err := os.ReadFile(runtimeName); err == nil {
@@ -93,7 +122,7 @@ func readWireGuardTransferCounters() (uint64, uint64, error) {
 			interfaceName = realName
 		}
 	}
-	out, err := exec.Command(wg, "show", interfaceName, "dump").Output()
+	out, err := exec.Command(privilegedWGPath(), "show", interfaceName, "dump").Output()
 	if err != nil {
 		return 0, 0, err
 	}
@@ -129,23 +158,6 @@ func parseWireGuardDumpTransfer(output string) (uint64, uint64, error) {
 	return totalRX, totalTX, nil
 }
 
-func findWG() (string, error) {
-	if p, err := exec.LookPath("wg"); err == nil {
-		return p, nil
-	}
-	for _, p := range []string{
-		"/opt/homebrew/bin/wg",
-		"/usr/local/bin/wg",
-		"/usr/bin/wg",
-		"/usr/sbin/wg",
-	} {
-		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() && st.Mode().Perm()&0o111 != 0 {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("wg not found")
-}
-
 func findWgQuick() (string, error) {
 	if p, err := exec.LookPath("wg-quick"); err == nil {
 		return p, nil
@@ -164,22 +176,9 @@ func findWgQuick() (string, error) {
 }
 
 func readAndSanitizePrivilegedConfig(path string) (string, error) {
-	st, err := os.Lstat(path)
+	data, err := readSafeConfigFile(path)
 	if err != nil {
 		return "", err
-	}
-	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
-		return "", fmt.Errorf("config must be a regular non-symlink file")
-	}
-	if st.Mode().Perm()&0o022 != 0 {
-		return "", fmt.Errorf("config must not be group/world writable")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	if !looksLikeWireGuardConfig(data) {
-		return "", fmt.Errorf("missing [Interface] section")
 	}
 
 	var safe []string
@@ -197,8 +196,7 @@ func readAndSanitizePrivilegedConfig(path string) (string, error) {
 		safe = append(safe, line)
 	}
 
-	patched := injectDNSHooks(strings.Join(safe, "\n"))
-	return patched, nil
+	return injectDNSHooks(strings.Join(safe, "\n")), nil
 }
 
 func normalizedDNSIP(s string) string {

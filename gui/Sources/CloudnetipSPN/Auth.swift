@@ -12,8 +12,7 @@ final class AuthService: ObservableObject {
     private var loginTask: Task<Void, Never>?
     private var callbackServer: LoopbackServer?
 
-    static let configPath: String = (NSString(string: "~/.cloudnetip/spn.conf").expandingTildeInPath)
-    static let wgConfigPath: String = (NSString(string: "~/.cloudnetip/wg-netip.conf").expandingTildeInPath)
+    static let configPath = "/Library/Application Support/Cloudnetip SPN/spn.conf"
 
     private static var apiBase: String {
         if let v = ProcessInfo.processInfo.environment["NETIP_API_URL"], !v.isEmpty {
@@ -25,7 +24,9 @@ final class AuthService: ObservableObject {
     init() { refreshState() }
 
     func refreshState() {
-        hasConfig = FileManager.default.fileExists(atPath: Self.configPath)
+        let legacy = (NSString(string: "~/.cloudnetip/spn.conf").expandingTildeInPath)
+        hasConfig = FileManager.default.fileExists(atPath: Self.configPath) ||
+            FileManager.default.fileExists(atPath: legacy)
     }
 
     func startLogin() {
@@ -41,7 +42,7 @@ final class AuthService: ObservableObject {
                 guard String(data: conf, encoding: .utf8)?.contains("[Interface]") == true else {
                     throw AuthError.message("Server did not return a WireGuard config.")
                 }
-                try Self.saveConfig(conf)
+                try await Self.saveConfig(conf)
                 await MainActor.run {
                     self.hasConfig = true
                     self.inProgress = false
@@ -65,10 +66,33 @@ final class AuthService: ObservableObject {
         inProgress = false
     }
 
-    func logout() {
-        try? FileManager.default.removeItem(atPath: Self.configPath)
-        try? FileManager.default.removeItem(atPath: Self.wgConfigPath)
-        hasConfig = false
+    func logout(completion: @escaping (Bool) -> Void = { _ in }) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Self.runPrivilegedConfigCommand(
+                    "_config-remove",
+                    sourcePath: nil,
+                    prompt: "Cloudnetip SPN needs administrator permission to remove the protected VPN configuration."
+                )
+                await MainActor.run {
+                    self.hasConfig = false
+                    self.lastError = nil
+                    completion(true)
+                }
+            } catch {
+                await MainActor.run {
+                    self.lastError = error.localizedDescription
+                    let alert = NSAlert()
+                    alert.alertStyle = .warning
+                    alert.messageText = "Sign out failed"
+                    alert.informativeText = error.localizedDescription
+                    NSApp.activate(ignoringOtherApps: true)
+                    alert.runModal()
+                    completion(false)
+                }
+            }
+        }
     }
 
     private func runLoopbackFlow() async throws -> Data {
@@ -130,12 +154,68 @@ final class AuthService: ObservableObject {
         return data
     }
 
-    private static func saveConfig(_ data: Data) throws {
-        let dir = (configPath as NSString).deletingLastPathComponent
-        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
-        try data.write(to: URL(fileURLWithPath: configPath))
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configPath)
+    private static func saveConfig(_ data: Data) async throws {
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cloudnetip-spn-\(UUID().uuidString).conf")
+        defer { try? FileManager.default.removeItem(at: temp) }
+        try data.write(to: temp, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temp.path)
+        try await runPrivilegedConfigCommand(
+            "_config-install",
+            sourcePath: temp.path,
+            prompt: "Cloudnetip SPN needs administrator permission to protect the VPN configuration from modification by normal user processes."
+        )
+        let legacyDir = (NSString(string: "~/.cloudnetip").expandingTildeInPath)
+        try? FileManager.default.removeItem(atPath: legacyDir)
+    }
+
+    private static func runPrivilegedConfigCommand(
+        _ command: String,
+        sourcePath: String?,
+        prompt: String
+    ) async throws {
+        guard let resources = Bundle.main.resourceURL else {
+            throw AuthError.message("Application resources are unavailable.")
+        }
+        let helper = resources.appendingPathComponent("WireGuard/helper").path
+        guard FileManager.default.isExecutableFile(atPath: helper) else {
+            throw AuthError.message("Bundled privileged helper is missing.")
+        }
+        var arguments = [command]
+        if let sourcePath { arguments.append(sourcePath) }
+        let shellCommand = ([helper] + arguments).map(shellQuote).joined(separator: " ")
+        let script = """
+        on run argv
+            do shell script (item 1 of argv) with prompt (item 2 of argv) with administrator privileges
+        end run
+        """
+
+        let result = await withCheckedContinuation { continuation in
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            task.arguments = ["-e", script, shellCommand, prompt]
+            let out = Pipe(), err = Pipe()
+            task.standardOutput = out
+            task.standardError = err
+            task.terminationHandler = { process in
+                let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                continuation.resume(returning: (process.terminationStatus, stdout, stderr))
+            }
+            do {
+                try task.run()
+            } catch {
+                continuation.resume(returning: (-1, "", error.localizedDescription))
+            }
+        }
+        guard result.0 == 0 else {
+            let message = result.2.isEmpty ? result.1 : result.2
+            throw AuthError.message(message.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     private static func userAgent() -> String {

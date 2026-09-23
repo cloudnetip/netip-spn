@@ -105,25 +105,23 @@ private final class StatusBarController: NSObject, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
-        if controller.isConnected {
-            addAction("Disconnect", action: #selector(disconnect), key: "d")
+        auth.refreshState()
+        let hasConfig = controller.hasConfig || auth.hasConfig
+
+        if hasConfig {
+            if controller.isConnected {
+                addAction("Disconnect", action: #selector(disconnect), key: "d")
+            } else {
+                addAction("Connect", action: #selector(connect), key: "c")
+                addAction("Sign out", action: #selector(signOut))
+            }
         } else {
-            addAction("Connect", action: #selector(connect), key: "c", enabled: controller.hasConfig)
-        }
-
-        menu.addItem(.separator())
-
-        if !auth.hasConfig {
             addAction(
-                auth.inProgress ? "Signing in…" : "Sign in…",
+                auth.inProgress ? "Signing in…" : "Sign in",
                 action: #selector(signIn),
                 enabled: !auth.inProgress
             )
-        }
-
-        addAction("Choose config…", action: #selector(chooseConfig))
-        if controller.hasConfig {
-            addAction("Reveal config in Finder", action: #selector(revealConfig))
+            addAction("Choose config", action: #selector(chooseConfig))
         }
 
         menu.addItem(.separator())
@@ -135,10 +133,6 @@ private final class StatusBarController: NSObject, NSMenuDelegate {
         stats.state = controller.showStatsInBar ? .on : .off
 
         addAction("Show logs", action: #selector(showLogs))
-
-        if auth.hasConfig {
-            addAction("Sign out", action: #selector(signOut))
-        }
 
         menu.addItem(.separator())
         addAction("About Cloudnetip SPN", action: #selector(showAbout))
@@ -168,8 +162,9 @@ private final class StatusBarController: NSObject, NSMenuDelegate {
     @objc private func connect() { controller.connect() }
     @objc private func disconnect() { controller.disconnect() }
     @objc private func signIn() { AuthFlowPresenter.start(auth: auth, controller: controller) }
-    @objc private func chooseConfig() { controller.chooseConfig() }
-    @objc private func revealConfig() { controller.revealConfig() }
+    @objc private func chooseConfig() {
+        controller.chooseConfig { [weak self] in self?.auth.refreshState() }
+    }
     @objc private func toggleLaunchAtLogin() { controller.toggleLaunchAtLogin() }
     @objc private func toggleShowStats() { controller.toggleShowStatsInBar() }
     @objc private func showLogs() { controller.showLogs() }
@@ -177,8 +172,22 @@ private final class StatusBarController: NSObject, NSMenuDelegate {
     @objc private func quit() { controller.quit() }
 
     @objc private func signOut() {
-        auth.logout()
-        controller.refresh()
+        guard !controller.isConnected else { return }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Sign out of Cloudnetip SPN?"
+        alert.informativeText = "The saved VPN configuration will be removed from this Mac."
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        auth.logout { [weak self] success in
+            guard success else { return }
+            self?.controller.refresh()
+        }
     }
 }
 

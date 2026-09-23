@@ -66,8 +66,14 @@ func TestSudoersRuleTargetsRootOwnedHelper(t *testing.T) {
 	if !strings.Contains(rules, "_privileged check") {
 		t.Fatalf("rule must allow the side-effect-free helper readiness check: %s", rules)
 	}
-	if !strings.Contains(rules, `Alice\ Example/.cloudnetip/spn.conf`) {
-		t.Fatalf("path with spaces was not sudoers-escaped: %s", rules)
+	if strings.Contains(rules, ".cloudnetip") || strings.Contains(rules, "spn.conf") {
+		t.Fatalf("sudoers rule must not trust a user-writable config path: %s", rules)
+	}
+	for _, action := range []string{"check", "up", "down"} {
+		want := privilegedHelperPath() + " _privileged " + action
+		if !strings.Contains(rules, want) {
+			t.Fatalf("rule does not allow exact %s action: %s", action, rules)
+		}
 	}
 }
 
@@ -107,5 +113,65 @@ func TestParseWireGuardDumpTransferRejectsMalformedPeer(t *testing.T) {
 	const dump = "private\tpublic\t51820\toff\npeer-only\n"
 	if _, _, err := parseWireGuardDumpTransfer(dump); err == nil {
 		t.Fatal("expected malformed peer row to fail")
+	}
+}
+
+func TestParsePrivilegedRuntimeConfigSeparatesNetworkSettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "spn.conf")
+	input := `[Interface]
+PrivateKey = abc
+Address = 10.66.66.2/32, fd00::2/128
+DNS = 10.66.66.1
+MTU = 1380
+Table = auto
+PostUp = touch /tmp/owned
+
+[Peer]
+PublicKey = def
+AllowedIPs = 10.66.66.0/24, fd00::/64
+Endpoint = vpn.example:51820
+PersistentKeepalive = 25
+`
+	if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := parsePrivilegedRuntimeConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MTU != 1380 || cfg.Table != "auto" {
+		t.Fatalf("unexpected MTU/Table: %+v", cfg)
+	}
+	if len(cfg.Addresses) != 2 || len(cfg.DNS) != 1 || len(cfg.AllowedIPs) != 2 {
+		t.Fatalf("unexpected parsed config: %+v", cfg)
+	}
+	for _, forbidden := range []string{"Address =", "DNS =", "MTU =", "Table =", "PostUp ="} {
+		if strings.Contains(cfg.WGConfig, forbidden) {
+			t.Fatalf("wg setconf payload still contains %q:\n%s", forbidden, cfg.WGConfig)
+		}
+	}
+	for _, required := range []string{"PrivateKey = abc", "AllowedIPs = 10.66.66.0/24", "Endpoint = vpn.example:51820"} {
+		if !strings.Contains(cfg.WGConfig, required) {
+			t.Fatalf("wg setconf payload lost %q:\n%s", required, cfg.WGConfig)
+		}
+	}
+}
+
+func TestExpectedWireGuardRuntimeVersion(t *testing.T) {
+	got := expectedWireGuardRuntimeVersion()
+	if got != "wg-1.0.20260223+wireguard-go-0.0.20250522+r1" {
+		t.Fatalf("unexpected runtime version %q", got)
+	}
+}
+
+func TestNormalizePrivilegedAddressAddsHostPrefix(t *testing.T) {
+	got4, err := normalizePrivilegedAddress("10.66.66.2")
+	if err != nil || got4 != "10.66.66.2/32" {
+		t.Fatalf("IPv4 normalization: got %q err=%v", got4, err)
+	}
+	got6, err := normalizePrivilegedAddress("fd00::2")
+	if err != nil || got6 != "fd00::2/128" {
+		t.Fatalf("IPv6 normalization: got %q err=%v", got6, err)
 	}
 }

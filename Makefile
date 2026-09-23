@@ -2,7 +2,7 @@ BINARY := netip-spn
 VERSION ?= dev
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build build-linux build-darwin install clean test run app app-dev app-clean package release release-assets all dev dev-cli dev-app dev-clean
+.PHONY: build build-linux build-darwin install clean test run wireguard-runtime wireguard-runtime-force app app-dev app-clean package release release-assets all dev dev-cli dev-app dev-clean
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
@@ -28,6 +28,12 @@ test:
 
 run:
 	go run .
+
+wireguard-runtime:
+	cd gui && UNIVERSAL=1 ./build-wireguard-runtime.sh
+
+wireguard-runtime-force:
+	cd gui && UNIVERSAL=1 FORCE_WIREGUARD_RUNTIME=1 ./build-wireguard-runtime.sh
 
 # Universal arm64+x86_64 .app — used for release/cask packaging.
 app:
