@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,6 +40,14 @@ func main() {
 		cmdConfig(path)
 	case "auth":
 		cmdAuth(os.Args[2:])
+	case "sudoers":
+		cmdSudoers(os.Args[2:])
+	case "_sudoers-install":
+		cmdSudoersRootInstall(os.Args[2:])
+	case "_sudoers-remove":
+		cmdSudoersRootRemove()
+	case "_privileged":
+		cmdPrivileged(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("netip-spn", version)
 	case "help", "--help", "-h":
@@ -61,6 +70,9 @@ Usage:
   netip-spn status               Show tunnel state
   netip-spn stats                Print connection stats as JSON (since/rx/tx)
   netip-spn config [path]        Set config file from local path (file picker if omitted)
+  netip-spn sudoers              Enable passwordless connect/disconnect (one-time admin auth)
+  netip-spn sudoers check        Show passwordless mode state
+  netip-spn sudoers remove       Disable passwordless mode
   netip-spn version              Print version
 
 Config:
@@ -120,13 +132,48 @@ func cmdStats() {
 		utun = strings.TrimSpace(string(data))
 	}
 	if utun == "" {
+		// wireguard-go writes the authoritative utun name to runtimeName, but
+		// that file is root-only on macOS. Match the Address from our config to
+		// the live utun interface instead of blindly taking the first utun socket.
+		utun = findWGUtunByConfig(userConfigPath())
+	}
+	if utun == "" {
+		// Last-resort compatibility fallback for configs without Address.
 		utun = findWGUtun()
 	}
 
 	since := info.ModTime().Unix()
-	rx, tx := readIfaceCounters(utun)
-	fmt.Printf(`{"connected":true,"iface":%q,"since":%d,"rx":%d,"tx":%d}`+"\n",
-		utun, since, rx, tx)
+	rx, tx, ok := readPrivilegedWireGuardCounters(userConfigPath())
+	counterSource := "wireguard"
+	if !ok {
+		// Fallback for older helpers or unusual installations. WireGuard's own
+		// transfer counters are preferred because they describe the tunnel
+		// itself rather than macOS' utun accounting.
+		rx, tx = readIfaceCounters(utun)
+		counterSource = "netstat"
+	}
+	fmt.Printf(`{"connected":true,"iface":%q,"since":%d,"rx":%d,"tx":%d,"source":%q}`+"\n",
+		utun, since, rx, tx, counterSource)
+}
+
+func readPrivilegedWireGuardCounters(source string) (uint64, uint64, bool) {
+	cmd := exec.Command("sudo", "-n", privilegedHelperPath(), "_privileged", "check", source)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) != 3 || fields[0] != "wireguard-transfer:" {
+			continue
+		}
+		rx, rxErr := strconv.ParseUint(fields[1], 10, 64)
+		tx, txErr := strconv.ParseUint(fields[2], 10, 64)
+		if rxErr == nil && txErr == nil {
+			return rx, tx, true
+		}
+	}
+	return 0, 0, false
 }
 
 // readIfaceCounters parses `netstat -ibn` to get RX/TX bytes for the given
@@ -140,30 +187,144 @@ func readIfaceCounters(iface string) (uint64, uint64) {
 	if err != nil {
 		return 0, 0
 	}
-	// On macOS netstat -ibn emits two row shapes:
-	//   link-level (10 cols): Name Mtu Network=<Link#N> Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
-	//   address-level (11 cols): Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
-	// The address-level row only counts packets on that family, so the
-	// link-level row is the source of truth — sum is the per-iface total.
-	for _, line := range strings.Split(string(out), "\n") {
+	return parseIfaceCounters(string(out), iface)
+}
+
+func parseIfaceCounters(output, iface string) (uint64, uint64) {
+	if iface == "" {
+		return 0, 0
+	}
+
+	// macOS labels received bytes as Ibytes and transmitted bytes as Obytes.
+	// A <Link#N> row may omit the Address field (utun commonly does), which
+	// shifts all following columns left by one. Read the header so both shapes
+	// are handled instead of assuming one fixed set of indexes.
+	headerLen, iBytesCol, oBytesCol := 0, -1, -1
+	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 10 || fields[0] != iface {
+		if len(fields) == 0 {
 			continue
 		}
-		// Link-level rows have "<Link#N>" in the Network column and no Address.
-		if strings.HasPrefix(fields[2], "<Link#") {
-			rx, _ := strconv.ParseUint(fields[5], 10, 64)
-			tx, _ := strconv.ParseUint(fields[8], 10, 64)
-			return rx, tx
+		if fields[0] == "Name" {
+			headerLen = len(fields)
+			for i, field := range fields {
+				switch field {
+				case "Ibytes":
+					iBytesCol = i
+				case "Obytes":
+					oBytesCol = i
+				}
+			}
+			continue
 		}
+		if len(fields) < 3 || fields[0] != iface || !strings.HasPrefix(fields[2], "<Link#") {
+			continue
+		}
+
+		rxCol, txCol := iBytesCol, oBytesCol
+		if headerLen > 0 && len(fields) == headerLen-1 {
+			rxCol--
+			txCol--
+		}
+		if rxCol < 0 || txCol < 0 || rxCol >= len(fields) || txCol >= len(fields) {
+			// Fallback for unusual output without a recognizable header.
+			if len(fields) >= 11 {
+				rxCol, txCol = 6, 9
+			} else if len(fields) >= 10 {
+				rxCol, txCol = 5, 8
+			} else {
+				return 0, 0
+			}
+		}
+
+		rx, rxErr := strconv.ParseUint(fields[rxCol], 10, 64)
+		tx, txErr := strconv.ParseUint(fields[txCol], 10, 64)
+		if rxErr != nil || txErr != nil {
+			return 0, 0
+		}
+		return rx, tx
 	}
 	return 0, 0
 }
 
-// findWGUtun returns the utun interface that WireGuard's userspace daemon is
-// bound to. It reads /var/run/wireguard/ — the directory is world-readable on
-// macOS even though the .name file inside is root-only. Each running tunnel
-// leaves a utunN.sock socket there, so the .sock filename gives us the iface.
+func findWGUtunByConfig(configPath string) string {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+	targets := parseWireGuardInterfaceIPs(string(data))
+	if len(targets) == 0 {
+		return ""
+	}
+
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if !strings.HasPrefix(iface.Name, "utun") {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ip := ipFromInterfaceAddr(addr.String())
+			if ip == nil {
+				continue
+			}
+			for _, target := range targets {
+				if ip.Equal(target) {
+					return iface.Name
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func parseWireGuardInterfaceIPs(config string) []net.IP {
+	var result []net.IP
+	inInterface := false
+	for _, line := range strings.Split(config, "\n") {
+		trimmed := strings.TrimSpace(strings.SplitN(line, "#", 2)[0])
+		if strings.HasPrefix(trimmed, "[") {
+			inInterface = strings.EqualFold(trimmed, "[Interface]")
+			continue
+		}
+		if !inInterface {
+			continue
+		}
+		parts := strings.SplitN(trimmed, "=", 2)
+		if len(parts) != 2 || !strings.EqualFold(strings.TrimSpace(parts[0]), "Address") {
+			continue
+		}
+		for _, raw := range strings.Split(parts[1], ",") {
+			ip := ipFromInterfaceAddr(strings.TrimSpace(raw))
+			if ip != nil {
+				result = append(result, ip)
+			}
+		}
+	}
+	return result
+}
+
+func ipFromInterfaceAddr(value string) net.IP {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if ip, _, err := net.ParseCIDR(value); err == nil {
+		return ip
+	}
+	return net.ParseIP(value)
+}
+
+// findWGUtun is a last-resort compatibility fallback. If the WireGuard
+// runtime directory is readable, each userspace tunnel leaves a utunN.sock
+// there. Do not prefer this over findWGUtunByConfig: multiple WireGuard tunnels
+// can coexist and the first socket is not necessarily ours.
 func findWGUtun() string {
 	entries, err := os.ReadDir("/var/run/wireguard")
 	if err != nil {
@@ -201,33 +362,13 @@ func cmdConnect() {
 	if _, err := os.Stat(src); err != nil {
 		fail("no config found at %s\n   Run: netip-spn auth login (or: netip-spn config <path>)", src)
 	}
-
 	if _, err := os.Stat(runtimeName); err == nil {
 		fmt.Println("SPN is already up. Run `netip-spn disconnect` first.")
 		return
 	}
 
-	// Read user config and inject DNS hooks if DNS is present
-	configData, err := os.ReadFile(src)
-	if err != nil {
-		fail("cannot read config: %v", err)
-	}
-	patchedConfig := injectDNSHooks(string(configData))
-
-	// Write patched config to user directory
-	wgConfPath := userWgConfigPath()
-	dir := userConfigDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		fail("cannot create directory %s: %v", dir, err)
-	}
-
-	fmt.Println("Deploying config to", wgConfPath)
-	if err := os.WriteFile(wgConfPath, []byte(patchedConfig), 0600); err != nil {
-		fail("cannot write config: %v", err)
-	}
-
 	fmt.Println("Starting tunnel...")
-	mustSudo("wg-quick", "up", wgConfPath)
+	runPrivileged("up", src)
 	fmt.Println("● SPN: connected")
 }
 
@@ -237,9 +378,34 @@ func cmdDisconnect() {
 		return
 	}
 	requireWireGuard()
-	wgConfPath := userWgConfigPath()
-	mustSudo("wg-quick", "down", wgConfPath)
+	src := userConfigPath()
+	runPrivileged("down", src)
 	fmt.Println("● SPN: disconnected")
+}
+
+func runPrivileged(action, source string) {
+	var exe string
+	var args []string
+	if activeNow() {
+		exe = privilegedHelperPath()
+		args = []string{"-n", exe, "_privileged", action, source}
+		exe = "sudo"
+	} else {
+		current, err := os.Executable()
+		if err != nil {
+			fail("cannot resolve executable path: %v", err)
+		}
+		current, _ = filepath.EvalSymlinks(current)
+		exe = "sudo"
+		args = []string{current, "_privileged", action, source}
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fail("privileged %s failed: %v", action, err)
+	}
 }
 
 func cmdConfig(path string) {
@@ -302,16 +468,6 @@ func requireWireGuard() {
 	}
 }
 
-func mustSudo(args ...string) {
-	cmd := exec.Command("sudo", args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fail("command failed: sudo %s: %v", strings.Join(args, " "), err)
-	}
-}
-
 func fail(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "✗ "+format+"\n", a...)
 	os.Exit(1)
@@ -356,9 +512,8 @@ func injectDNSHooks(config string) string {
 				dns := strings.TrimSpace(parts[1])
 				// Handle comma-separated DNS
 				for _, d := range strings.Split(dns, ",") {
-					d = strings.TrimSpace(d)
-					if d != "" {
-						dnsServers = append(dnsServers, d)
+					if ip := normalizedDNSIP(d); ip != "" {
+						dnsServers = append(dnsServers, ip)
 					}
 				}
 			}

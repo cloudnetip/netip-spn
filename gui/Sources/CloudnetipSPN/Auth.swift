@@ -3,10 +3,6 @@ import CryptoKit
 import Darwin
 import Foundation
 
-// OAuth 2.0 authorization-code flow with PKCE (RFC 7636) over a loopback
-// redirect (RFC 8252). The server's claim endpoint returns a wg-quick config
-// directly — no Bearer token is ever issued, so there's nothing to persist
-// beyond ~/.cloudnetip/spn.conf itself.
 @MainActor
 final class AuthService: ObservableObject {
     @Published private(set) var hasConfig = false
@@ -75,18 +71,17 @@ final class AuthService: ObservableObject {
         hasConfig = false
     }
 
-    // MARK: - Flow
-
     private func runLoopbackFlow() async throws -> Data {
-        let server = try LoopbackServer.start()
+        let state = Self.randomURLSafe(24)
+        let verifier = Self.randomURLSafe(48)
+        let challenge = Self.pkceS256(verifier)
+
+        let server = try LoopbackServer.start(expectedState: state)
         await MainActor.run { self.callbackServer = server }
         defer { server.stop() }
 
         let port = server.port
         let redirectURI = "http://127.0.0.1:\(port)/callback"
-        let state = Self.randomURLSafe(24)
-        let verifier = Self.randomURLSafe(48)
-        let challenge = Self.pkceS256(verifier)
 
         var comp = URLComponents(string: Self.apiBase + "/app/shared/authorize")!
         comp.queryItems = [
@@ -102,9 +97,6 @@ final class AuthService: ObservableObject {
         NSWorkspace.shared.open(url)
 
         let callback = try await server.waitForCallback(timeout: 300)
-        guard callback.state == state else {
-            throw AuthError.message("State mismatch — possible CSRF, ignored.")
-        }
         if let oauthErr = callback.error {
             throw AuthError.message("Authorization failed: \(oauthErr)")
         }
@@ -171,12 +163,6 @@ final class AuthService: ObservableObject {
     }
 }
 
-// MARK: - Loopback HTTP server
-
-// Minimal HTTP/1.1 server bound to 127.0.0.1:0 via POSIX sockets. We use
-// raw BSD sockets (not NWListener) because NWListener.port is populated
-// asynchronously after start() and a polling loop occasionally returned 0
-// in release builds — so the redirect_uri shipped a port=0 URL.
 final class LoopbackServer: @unchecked Sendable {
     struct Callback {
         let code: String?
@@ -185,13 +171,16 @@ final class LoopbackServer: @unchecked Sendable {
     }
 
     private let listenFD: Int32
+    private let expectedState: String
     private var continuation: CheckedContinuation<Callback, Error>?
+    private var pendingCallback: Callback?
     private let queue = DispatchQueue(label: "netip.spn.loopback")
     private var done = false
+    private var listenerClosed = false
 
     let port: Int
 
-    static func start() throws -> LoopbackServer {
+    static func start(expectedState: String) throws -> LoopbackServer {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw makeErr("socket(): \(String(cString: strerror(errno)))") }
 
@@ -200,7 +189,7 @@ final class LoopbackServer: @unchecked Sendable {
 
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = 0                                  // kernel picks
+        addr.sin_port = 0
         addr.sin_addr.s_addr = inet_addr("127.0.0.1")
         let addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
 
@@ -238,14 +227,13 @@ final class LoopbackServer: @unchecked Sendable {
             throw makeErr("kernel returned port 0")
         }
 
-        return LoopbackServer(listenFD: fd, port: port)
+        return LoopbackServer(listenFD: fd, port: port, expectedState: expectedState)
     }
 
-    private init(listenFD: Int32, port: Int) {
+    private init(listenFD: Int32, port: Int, expectedState: String) {
         self.listenFD = listenFD
         self.port = port
-        // accept() blocks, so run it on a dedicated background thread —
-        // not on `queue`, which we keep free for state synchronization.
+        self.expectedState = expectedState
         Thread.detachNewThread { [weak self] in self?.acceptLoop() }
     }
 
@@ -260,6 +248,7 @@ final class LoopbackServer: @unchecked Sendable {
             self?.queue.async {
                 guard let self, !self.done else { return }
                 self.done = true
+                self.closeListenerLocked()
                 self.continuation?.resume(throwing: NSError(
                     domain: "LoopbackServer", code: 2,
                     userInfo: [NSLocalizedDescriptionKey: "timed out waiting for browser callback"]))
@@ -270,7 +259,15 @@ final class LoopbackServer: @unchecked Sendable {
 
         return try await withCheckedThrowingContinuation { cont in
             queue.async {
-                if self.done { return }
+                if let pending = self.pendingCallback {
+                    self.pendingCallback = nil
+                    cont.resume(returning: pending)
+                    return
+                }
+                if self.done {
+                    cont.resume(throwing: CancellationError())
+                    return
+                }
                 self.continuation = cont
             }
         }
@@ -278,19 +275,31 @@ final class LoopbackServer: @unchecked Sendable {
 
     func stop() {
         queue.async {
-            guard !self.done else { return }
+            guard !self.done else {
+                self.closeListenerLocked()
+                return
+            }
             self.done = true
-            close(self.listenFD)
+            self.closeListenerLocked()
+            self.continuation?.resume(throwing: CancellationError())
+            self.continuation = nil
+            self.pendingCallback = nil
         }
     }
 
+    private func closeListenerLocked() {
+        guard !listenerClosed else { return }
+        listenerClosed = true
+        close(listenFD)
+    }
+
     private func acceptLoop() {
-        while !done {
+        while true {
             var caddr = sockaddr()
             var clen = socklen_t(MemoryLayout<sockaddr>.size)
             let client = accept(listenFD, &caddr, &clen)
             if client < 0 {
-                if done { return }
+                if errno == EBADF || errno == EINVAL { return }
                 Thread.sleep(forTimeInterval: 0.01)
                 continue
             }
@@ -305,50 +314,92 @@ final class LoopbackServer: @unchecked Sendable {
         let request = n > 0
             ? String(bytes: buf[0..<n], encoding: .utf8) ?? ""
             : ""
-        let cb = Self.parseCallback(request)
-        let body = Self.responseHTML(cb)
-        let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
-        resp.withCString { ptr in
-            _ = send(fd, ptr, strlen(ptr), 0)
+
+        guard let parsed = Self.parseRequest(request) else {
+            Self.sendResponse(fd, status: "400 Bad Request", body: Self.messageHTML(
+                title: "Sign-in request ignored",
+                body: "The local callback request was malformed. Return to the active sign-in tab."
+            ))
+            return
         }
+
+        guard parsed.path == "/callback" else {
+            Self.sendResponse(fd, status: "404 Not Found", body: "Not found")
+            return
+        }
+
+        guard parsed.callback.state == expectedState else {
+            Self.sendResponse(fd, status: "200 OK", body: Self.messageHTML(
+                title: "Old sign-in request ignored",
+                body: "This callback belongs to an earlier sign-in attempt. Continue in the newest Cloudnetip SPN sign-in tab."
+            ))
+            return
+        }
+
+        let body = Self.responseHTML(parsed.callback)
+        Self.sendResponse(fd, status: "200 OK", body: body)
+
         queue.async {
             guard !self.done else { return }
             self.done = true
-            self.continuation?.resume(returning: cb)
-            self.continuation = nil
-            close(self.listenFD)
+            self.closeListenerLocked()
+            if let continuation = self.continuation {
+                self.continuation = nil
+                continuation.resume(returning: parsed.callback)
+            } else {
+                self.pendingCallback = parsed.callback
+            }
         }
     }
 
-    private static func parseCallback(_ request: String) -> Callback {
-        guard let firstLine = request.split(separator: "\r\n").first else {
-            return Callback(code: nil, state: nil, error: "bad request")
+    private static func sendResponse(_ fd: Int32, status: String, body: String) {
+        let resp = "HTTP/1.1 \(status)\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+        resp.withCString { ptr in
+            _ = send(fd, ptr, strlen(ptr), 0)
         }
+    }
+
+    private static func parseRequest(_ request: String) -> (path: String, callback: Callback)? {
+        guard let firstLine = request.split(separator: "\r\n").first else { return nil }
         let parts = firstLine.split(separator: " ")
-        guard parts.count >= 2 else {
-            return Callback(code: nil, state: nil, error: "bad request")
-        }
-        let path = String(parts[1])
-        guard let comp = URLComponents(string: "http://127.0.0.1" + path) else {
-            return Callback(code: nil, state: nil, error: "bad path")
-        }
+        guard parts.count >= 2 else { return nil }
+        let rawPath = String(parts[1])
+        guard let comp = URLComponents(string: "http://127.0.0.1" + rawPath) else { return nil }
         let q = Dictionary(uniqueKeysWithValues:
             (comp.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-        return Callback(code: q["code"], state: q["state"], error: q["error"])
+        return (
+            path: comp.path,
+            callback: Callback(code: q["code"], state: q["state"], error: q["error"])
+        )
     }
 
     private static func responseHTML(_ cb: Callback) -> String {
-        let ok = cb.error == nil && cb.code != nil
-        let title = ok ? "✓ Configured" : "Sign-in failed"
-        let body = ok
-            ? "You can close this tab and return to the app."
-            : "Error: \(cb.error ?? "unknown")"
+        if let error = cb.error {
+            return messageHTML(title: "Sign-in failed", body: "Error: \(error)")
+        }
+        return messageHTML(
+            title: "✓ Sign-in received",
+            body: "You can close this tab and return to the app."
+        )
+    }
+
+    private static func messageHTML(title: String, body: String) -> String {
+        let safeTitle = htmlEscape(title)
+        let safeBody = htmlEscape(body)
         return """
-        <!doctype html><meta charset=utf-8><title>\(title)</title>
+        <!doctype html><meta charset=utf-8><title>\(safeTitle)</title>
         <style>body{font:16px/1.4 -apple-system,system-ui,sans-serif;max-width:520px;margin:80px auto;padding:0 20px;text-align:center}h1{margin-bottom:8px}</style>
-        <h1>\(title)</h1><p>\(body)</p>
+        <h1>\(safeTitle)</h1><p>\(safeBody)</p>
         <script>setTimeout(function(){window.close()},1500)</script>
         """
+    }
+
+    private static func htmlEscape(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
     }
 }
 

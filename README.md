@@ -36,25 +36,43 @@ The GUI is macOS-only by design. On Linux, use the CLI directly or wrap it in a 
 ```bash
 netip-spn config ~/Downloads/spn.conf   # save your WireGuard config
 netip-spn config                         # …or open a native file picker
-netip-spn connect                        # bring tunnel up (asks for sudo)
+netip-spn connect                        # bring tunnel up (asks for admin auth by default)
 netip-spn status                         # check state (no sudo needed)
 netip-spn disconnect                     # bring tunnel down
+netip-spn sudoers                        # one-time setup: no password on future connect/disconnect
+netip-spn sudoers check                  # show passwordless mode state
+netip-spn sudoers remove                 # disable passwordless mode
 ```
 
-The menubar app provides the same actions plus auto-refreshing status. Connect/Disconnect launch a Terminal window so
-you can enter your sudo password.
+The menubar app provides the same actions plus auto-refreshing status. On the first Connect it asks for macOS
+administrator authorization once and installs the root-owned helper plus the tightly scoped sudoers rule. The same
+Connect then continues automatically. Future Connect/Disconnect actions use that helper with `sudo -n` and do not ask
+for the password again. There is no separate passwordless toggle in the GUI. `Show stats in bar` is off by default;
+when enabled, the two menubar rates refresh once per second. `Show logs` opens the captured WireGuard/wg-quick
+connect and disconnect output.
 
 ## Where files live
 
 | Path                               | Purpose                                |
 |------------------------------------|----------------------------------------|
 | `~/.cloudnetip/spn.conf`           | Your saved WireGuard config (mode 600) |
-| `~/.cloudnetip/wg-netip.conf`      | Deployed copy used by `wg-quick`       |
+| `~/.cloudnetip/wireguard.log`      | GUI-captured WireGuard connect/disconnect log (mode 600) |
+| `/var/run/netip-spn/wg-netip.conf` | Root-owned sanitized config used by `wg-quick` while connecting |
 | `/var/run/wireguard/wg-netip.name` | Created by wg-quick when tunnel is up  |
 
-`netip-spn config` validates the file has an `[Interface]` section and copies it into `~/.cloudnetip/`. Every `connect`
-re-deploys the saved config to `~/.cloudnetip/wg-netip.conf`, so editing `~/.cloudnetip/spn.conf` is enough — no need to
-re-run `config`.
+`netip-spn config` validates the file has an `[Interface]` section and copies it into `~/.cloudnetip/`. Every connect
+rebuilds a root-owned runtime config from that source. User-supplied wg-quick shell hooks (`PreUp`, `PostUp`, `PreDown`,
+`PostDown`) are stripped before privileged execution; Cloudnetip's fixed DNS hooks are then generated from validated IPs.
+
+### Passwordless helper security
+
+The GUI installs the same helper used by `netip-spn sudoers` automatically on the first Connect. It does **not** grant
+`NOPASSWD` directly to `wg-quick` with a user-writable config. Instead it installs a root-owned helper
+(`/Library/PrivilegedHelperTools/com.cloudnetip.spn.helper` on macOS) and allows only its exact internal `up`/`down`
+commands for the current user's SPN config. This prevents user-controlled WireGuard hooks from becoming arbitrary
+passwordless root execution. The helper also exposes WireGuard's read-only per-peer transfer counters so the GUI can
+show tunnel RX/TX without relying on macOS utun accounting. `netip-spn sudoers remove` removes the helper; the next GUI
+Connect will install it again.
 
 ## Build
 
