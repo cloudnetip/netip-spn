@@ -222,7 +222,7 @@ func normalizePrivilegedAddress(value string) (string, error) {
 	return ip.String() + "/128", nil
 }
 
-func privilegedRuntimeUp(source string) error {
+func privilegedRuntimeUp(source string, useDNS bool) error {
 	if !privilegedRuntimeReady() {
 		return fmt.Errorf("bundled WireGuard runtime is missing or outdated")
 	}
@@ -315,16 +315,56 @@ func privilegedRuntimeUp(source string) error {
 		}
 		state.Routes = routes
 	}
-	if len(cfg.DNS) > 0 {
-		if err := setPrivilegedDNS(cfg.DNS); err != nil {
-			cleanup()
-			return err
-		}
-		state.DNS = true
+	if err := applyPrivilegedDNS(&state, cfg.DNS, useDNS, setPrivilegedDNS, removePrivilegedDNS); err != nil {
+		cleanup()
+		return err
 	}
 	if err := writePrivilegedState(state); err != nil {
 		cleanup()
 		return err
+	}
+	return nil
+}
+
+// Only change DNS for a tunnel owned by the GUI runtime. The persistent
+// config stays untouched, so DNS can be enabled again without signing in.
+func privilegedRuntimeSetDNS(enabled bool) error {
+	if !privilegedRuntimeReady() {
+		return errors.New("bundled WireGuard runtime is missing or outdated")
+	}
+	state, err := readPrivilegedState()
+	if err != nil {
+		return fmt.Errorf("DNS can only be changed for an active GUI tunnel: %w", err)
+	}
+	data, err := os.ReadFile(runtimeName)
+	if err != nil || state.Interface == "" || strings.TrimSpace(string(data)) != state.Interface {
+		return errors.New("DNS can only be changed for an active GUI tunnel")
+	}
+	var servers []string
+	if enabled {
+		cfg, err := parsePrivilegedRuntimeConfig(darwinSystemConfigPath)
+		if err != nil {
+			return fmt.Errorf("unsafe or invalid config: %w", err)
+		}
+		servers = cfg.DNS
+	}
+	if err := applyPrivilegedDNS(&state, servers, enabled, setPrivilegedDNS, removePrivilegedDNS); err != nil {
+		return err
+	}
+	return writePrivilegedState(state)
+}
+
+func applyPrivilegedDNS(state *privilegedTunnelState, servers []string, enabled bool, setDNS func([]string) error, removeDNS func() error) error {
+	if enabled && len(servers) > 0 {
+		if err := setDNS(servers); err != nil {
+			return err
+		}
+		state.DNS = true
+	} else {
+		if err := removeDNS(); err != nil {
+			return err
+		}
+		state.DNS = false
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,10 +70,24 @@ func TestSudoersRuleTargetsRootOwnedHelper(t *testing.T) {
 	if strings.Contains(rules, ".cloudnetip") || strings.Contains(rules, "spn.conf") {
 		t.Fatalf("sudoers rule must not trust a user-writable config path: %s", rules)
 	}
-	for _, action := range []string{"check", "up", "down"} {
-		want := privilegedHelperPath() + " _privileged " + action
-		if !strings.Contains(rules, want) {
-			t.Fatalf("rule does not allow exact %s action: %s", action, rules)
+	_, commands, ok := strings.Cut(strings.TrimSpace(rules), "NOPASSWD: ")
+	if !ok {
+		t.Fatalf("missing NOPASSWD rules: %s", rules)
+	}
+	allowed := []string{"check", "up", "up-no-dns", "down", "dns-on", "dns-off"}
+	var want []string
+	for _, action := range allowed {
+		if !validPrivilegedAction(action) {
+			t.Fatalf("helper rejects %s", action)
+		}
+		want = append(want, privilegedHelperPath()+" _privileged "+action)
+	}
+	if commands != strings.Join(want, ", ") {
+		t.Fatalf("unexpected sudoers commands: %s", commands)
+	}
+	for _, action := range []string{"", "up /tmp/config", "dns-on 1.1.1.1", "*", "other"} {
+		if validPrivilegedAction(action) {
+			t.Fatalf("helper accepts unexpected action %q", action)
 		}
 	}
 }
@@ -173,5 +188,48 @@ func TestNormalizePrivilegedAddressAddsHostPrefix(t *testing.T) {
 	got6, err := normalizePrivilegedAddress("fd00::2")
 	if err != nil || got6 != "fd00::2/128" {
 		t.Fatalf("IPv6 normalization: got %q err=%v", got6, err)
+	}
+}
+
+func TestApplyPrivilegedDNS(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enabled bool
+		servers []string
+		wantDNS bool
+	}{
+		{"enabled", true, []string{"10.66.66.1"}, true},
+		{"disabled", false, []string{"10.66.66.1"}, false},
+		{"no configured servers", true, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := privilegedTunnelState{DNS: !tc.wantDNS}
+			set, removed := 0, 0
+			err := applyPrivilegedDNS(&state, tc.servers, tc.enabled, func(servers []string) error {
+				set++
+				if strings.Join(servers, ",") != strings.Join(tc.servers, ",") {
+					t.Fatalf("unexpected DNS servers: %v", servers)
+				}
+				return nil
+			}, func() error {
+				removed++
+				return nil
+			})
+			if err != nil || state.DNS != tc.wantDNS || set+removed != 1 || (set == 1) != tc.wantDNS {
+				t.Fatalf("DNS=%t set=%d removed=%d err=%v", state.DNS, set, removed, err)
+			}
+		})
+	}
+}
+
+func TestApplyPrivilegedDNSKeepsStateOnFailure(t *testing.T) {
+	wantErr := errors.New("scutil failed")
+	for _, enabled := range []bool{true, false} {
+		state := privilegedTunnelState{DNS: !enabled}
+		err := applyPrivilegedDNS(&state, []string{"10.66.66.1"}, enabled,
+			func([]string) error { return wantErr }, func() error { return wantErr })
+		if !errors.Is(err, wantErr) || state.DNS != !enabled {
+			t.Fatalf("enabled=%t DNS=%t err=%v", enabled, state.DNS, err)
+		}
 	}
 }

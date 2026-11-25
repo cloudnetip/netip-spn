@@ -21,6 +21,8 @@ final class SPNController: ObservableObject {
     @Published var error: String?
     @Published var launchAtLogin: Bool = SPNController.readLaunchAtLogin()
     @Published var showStatsInBar: Bool = SPNController.readShowStatsInBar()
+    @Published private(set) var useDNS: Bool = UserDefaults.standard.object(forKey: "useDNS") as? Bool ?? true
+    @Published private(set) var tunnelCommandInProgress = false
     @Published var rxRateText = "0 KB/s"
     @Published var txRateText = "0 KB/s"
 
@@ -201,25 +203,34 @@ final class SPNController: ObservableObject {
     }
 
     func connect() {
-        guard hasConfig, locateCLI() != nil else { return }
-        withPasswordlessHelper { [weak self] ready in
-            guard let self, ready else { return }
-            self.runTunnelCommand("up")
-        }
+        guard hasConfig, !isConnected, !tunnelCommandInProgress, locateCLI() != nil else { return }
+        performTunnelCommand(useDNS ? "up" : "up-no-dns")
     }
 
     func disconnect() {
-        guard locateCLI() != nil else { return }
+        guard !tunnelCommandInProgress, locateCLI() != nil else { return }
         isConnected = false
         statusLine = "SPN: Disconnected"
         statusDetail = nil
         resetTrafficStats()
+        performTunnelCommand("down")
+    }
+
+    private func performTunnelCommand(_ action: String, completion: ((Bool) -> Void)? = nil) {
+        guard !tunnelCommandInProgress else { return }
+        tunnelCommandInProgress = true
         withPasswordlessHelper { [weak self] ready in
-            guard let self, ready else {
-                self?.refresh()
+            guard let self else { return }
+            guard ready else {
+                self.tunnelCommandInProgress = false
+                self.refresh()
+                completion?(false)
                 return
             }
-            self.runTunnelCommand("down")
+            self.runTunnelCommand(action) { success in
+                self.tunnelCommandInProgress = false
+                completion?(success)
+            }
         }
     }
 
@@ -298,10 +309,11 @@ final class SPNController: ObservableObject {
         )
         return result.exitCode == 0 &&
             result.stdout.contains("privileged-helper: ready stats-v3") &&
+            result.stdout.contains("dns-v1") &&
             result.stdout.contains("runtime=\(expected)")
     }
 
-    private func runTunnelCommand(_ action: String) {
+    private func runTunnelCommand(_ action: String, completion: @escaping (Bool) -> Void) {
         let args = [
             "-n",
             "/Library/PrivilegedHelperTools/cloudnetip-spn/helper",
@@ -315,6 +327,7 @@ final class SPNController: ObservableObject {
                 self.presentError(result.stderr.isEmpty ? result.stdout : result.stderr)
             }
             self.refresh()
+            completion(result.exitCode == 0)
         }
     }
 
@@ -790,6 +803,7 @@ final class SPNController: ObservableObject {
     }
 
     func quit() {
+        guard !tunnelCommandInProgress else { return }
         if isConnected {
             disconnect()
         }
@@ -811,6 +825,20 @@ final class SPNController: ObservableObject {
             refreshTraffic()
         } else {
             refresh()
+        }
+    }
+
+    func toggleUseDNS() {
+        guard !tunnelCommandInProgress else { return }
+        let enabled = !useDNS
+        useDNS = enabled
+        UserDefaults.standard.set(enabled, forKey: "useDNS")
+        guard isConnected else { return }
+
+        performTunnelCommand(enabled ? "dns-on" : "dns-off") { [weak self] success in
+            guard let self, !success else { return }
+            self.useDNS = !enabled
+            UserDefaults.standard.set(!enabled, forKey: "useDNS")
         }
     }
 
@@ -861,7 +889,7 @@ final class SPNController: ObservableObject {
     }
 
     private static func readShowStatsInBar() -> Bool {
-        UserDefaults.standard.bool(forKey: "showStatsInBar")
+        UserDefaults.standard.object(forKey: "showStatsInBar") as? Bool ?? true
     }
 
     private func connectionLogURL() -> URL {

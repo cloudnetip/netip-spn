@@ -39,8 +39,8 @@ func sudoersRulesFor(username, home string) (string, error) {
 	helper := escape(privilegedHelperPath())
 	return fmt.Sprintf(
 		"# Installed by netip-spn. Remove with: netip-spn sudoers remove\n"+
-			"%s ALL=(root) NOPASSWD: %s _privileged check, %s _privileged up, %s _privileged down\n",
-		username, helper, helper, helper,
+			"%s ALL=(root) NOPASSWD: %s _privileged check, %s _privileged up, %s _privileged up-no-dns, %s _privileged down, %s _privileged dns-on, %s _privileged dns-off\n",
+		username, helper, helper, helper, helper, helper, helper,
 	), nil
 }
 
@@ -56,6 +56,7 @@ func activeNow() bool {
 	}
 	text := string(out)
 	return strings.Contains(text, "privileged-helper: ready stats-v3") &&
+		strings.Contains(text, "dns-v1") &&
 		strings.Contains(text, "runtime="+expectedWireGuardRuntimeVersion())
 }
 

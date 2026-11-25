@@ -29,7 +29,7 @@ final class AuthService: ObservableObject {
             FileManager.default.fileExists(atPath: legacy)
     }
 
-    func startLogin() {
+    func startLogin(completion: @escaping (Bool) -> Void) {
         guard !inProgress else { return }
         lastError = nil
         inProgress = true
@@ -46,13 +46,18 @@ final class AuthService: ObservableObject {
                 await MainActor.run {
                     self.hasConfig = true
                     self.inProgress = false
+                    completion(true)
                 }
             } catch is CancellationError {
-                await MainActor.run { self.inProgress = false }
+                await MainActor.run {
+                    self.inProgress = false
+                    completion(false)
+                }
             } catch {
                 await MainActor.run {
                     self.lastError = error.localizedDescription
                     self.inProgress = false
+                    completion(false)
                 }
             }
         }

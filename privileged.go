@@ -21,8 +21,8 @@ func cmdPrivileged(args []string) {
 	if os.Geteuid() != 0 {
 		fail("_privileged must run as root")
 	}
-	if len(args) != 1 || (args[0] != "check" && args[0] != "up" && args[0] != "down") {
-		fail("usage: _privileged <check|up|down>")
+	if len(args) != 1 || !validPrivilegedAction(args[0]) {
+		fail("usage: _privileged <check|up|up-no-dns|down|dns-on|dns-off>")
 	}
 	action := args[0]
 
@@ -30,7 +30,7 @@ func cmdPrivileged(args []string) {
 		if !privilegedRuntimeReady() {
 			fail("privileged WireGuard runtime is missing or outdated")
 		}
-		fmt.Printf("privileged-helper: ready stats-v3 runtime=%s\n", installedWireGuardRuntimeVersion())
+		fmt.Printf("privileged-helper: ready stats-v3 dns-v1 runtime=%s\n", installedWireGuardRuntimeVersion())
 		if data, err := os.ReadFile(runtimeName); err == nil {
 			if iface := strings.TrimSpace(string(data)); iface != "" {
 				fmt.Printf("wireguard-interface: %s\n", iface)
@@ -46,13 +46,25 @@ func cmdPrivileged(args []string) {
 		fail("bundled GUI WireGuard runtime is supported only on macOS")
 	}
 	var err error
-	if action == "up" {
-		err = privilegedRuntimeUp(darwinSystemConfigPath)
-	} else {
+	switch action {
+	case "up", "up-no-dns":
+		err = privilegedRuntimeUp(darwinSystemConfigPath, action == "up")
+	case "down":
 		err = privilegedRuntimeDown()
+	case "dns-on", "dns-off":
+		err = privilegedRuntimeSetDNS(action == "dns-on")
 	}
 	if err != nil {
 		fail("%s failed: %v", action, err)
+	}
+}
+
+func validPrivilegedAction(action string) bool {
+	switch action {
+	case "check", "up", "up-no-dns", "down", "dns-on", "dns-off":
+		return true
+	default:
+		return false
 	}
 }
 

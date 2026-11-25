@@ -20,6 +20,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let controller = SPNController()
             let auth = AuthService()
             self.statusBarController = StatusBarController(controller: controller, auth: auth)
+            if controller.launchAtLogin {
+                controller.connect()
+            }
         }
     }
 }
@@ -40,6 +43,7 @@ private final class StatusBarController: NSObject, NSMenuDelegate {
         super.init()
 
         statusItem.autosaveName = "CloudnetipSPN"
+        menu.autoenablesItems = false
         menu.delegate = self
         statusItem.menu = menu
 
@@ -110,10 +114,10 @@ private final class StatusBarController: NSObject, NSMenuDelegate {
 
         if hasConfig {
             if controller.isConnected {
-                addAction("Disconnect", action: #selector(disconnect), key: "d")
+                addAction("Disconnect", action: #selector(disconnect), key: "d", enabled: !controller.tunnelCommandInProgress)
             } else {
-                addAction("Connect", action: #selector(connect), key: "c")
-                addAction("Sign out", action: #selector(signOut))
+                addAction("Connect", action: #selector(connect), key: "c", enabled: !controller.tunnelCommandInProgress)
+                addAction("Sign out", action: #selector(signOut), enabled: !controller.tunnelCommandInProgress)
             }
         } else {
             addAction(
@@ -132,11 +136,14 @@ private final class StatusBarController: NSObject, NSMenuDelegate {
         let stats = addAction("Show stats in bar", action: #selector(toggleShowStats))
         stats.state = controller.showStatsInBar ? .on : .off
 
+        let dns = addAction("Use DNS", action: #selector(toggleUseDNS), enabled: !controller.tunnelCommandInProgress)
+        dns.state = controller.useDNS ? .on : .off
+
         addAction("Show logs", action: #selector(showLogs))
 
         menu.addItem(.separator())
         addAction("About Cloudnetip SPN", action: #selector(showAbout))
-        addAction("Quit Cloudnetip SPN", action: #selector(quit), key: "q")
+        addAction("Quit Cloudnetip SPN", action: #selector(quit), key: "q", enabled: !controller.tunnelCommandInProgress)
     }
 
     @discardableResult
@@ -167,12 +174,13 @@ private final class StatusBarController: NSObject, NSMenuDelegate {
     }
     @objc private func toggleLaunchAtLogin() { controller.toggleLaunchAtLogin() }
     @objc private func toggleShowStats() { controller.toggleShowStatsInBar() }
+    @objc private func toggleUseDNS() { controller.toggleUseDNS() }
     @objc private func showLogs() { controller.showLogs() }
     @objc private func showAbout() { controller.showAbout() }
     @objc private func quit() { controller.quit() }
 
     @objc private func signOut() {
-        guard !controller.isConnected else { return }
+        guard !controller.isConnected, !controller.tunnelCommandInProgress else { return }
 
         let alert = NSAlert()
         alert.alertStyle = .warning

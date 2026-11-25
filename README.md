@@ -61,8 +61,15 @@ updates do not touch it. If `wg` or `wireguard-go` is intentionally bumped, the 
 and asks for administrator authorization once on the next Connect to replace the root-owned runtime. During that
 one-time privileged upgrade, an existing `~/.cloudnetip/spn.conf` is migrated into the root-owned macOS config location
 and the legacy `~/.cloudnetip` directory is removed. The GUI moves the old `wireguard.log` to
-`~/Library/Logs/Cloudnetip SPN/` before that migration. `Show stats in bar` is off by default; when enabled, the two
-menubar rates refresh once per second. `Show logs` opens captured tunnel logs.
+`~/Library/Logs/Cloudnetip SPN/` before that migration. `Show stats in bar` is on by default; when enabled, the two
+menubar rates refresh once per second. `Use DNS` is also on by default and controls whether the GUI tunnel publishes
+the VPN DNS entry. Changing it while a GUI tunnel is active applies immediately, without reconnecting. Both preferences
+are saved across launches. `Show logs` opens captured tunnel logs.
+
+When `Launch at login` is enabled, the GUI automatically connects on startup if a configuration is saved and the
+VPN is not already connected. A successful `Sign in` also connects automatically, without a confirmation dialog.
+The first tunnel action after upgrading from a helper without DNS controls requests administrator authorization once
+to update the helper and its exact sudoers permissions; the pinned WireGuard runtime ID stays unchanged.
 
 ## Where files live
 
